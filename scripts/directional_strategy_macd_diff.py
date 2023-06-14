@@ -41,16 +41,15 @@ class MacdDiff(DirectionalStrategyBase):
     # Define the trading pair and exchange that we want to use and the csv where we are going to store the entries
     trading_pair: str = "DOGE-BUSD"
     exchange: str = "binance_perpetual"
-    order_amount_usd = Decimal("15")
+    order_amount_usd = Decimal("20")
     leverage = 20
 
     # Configure the parameters for the position
     stop_loss: float = 0.0075
-    take_profit: float = 0.015
+    take_profit: float = 0.1
     time_limit: int = 60 * 55
-    # TODO: Set trailing stop loss / see how to disable
-    trailing_stop_activation_delta = 0.003
-    trailing_stop_trailing_delta = 0.0007
+    trailing_stop_activation_delta = 0.0016
+    trailing_stop_trailing_delta = 0.001
 
     candles = [CandlesFactory.get_candle(connector=exchange,
                                          trading_pair=trading_pair,
@@ -65,15 +64,11 @@ class MacdDiff(DirectionalStrategyBase):
         """
         candles_df, macdh_col, macdh_norm_col = self.get_processed_df()
         delta_macd_thold = 0.0008
-        macdh_norm_thold = 0.0004
-        tp_multiplier = 0.3
-        sl_multiplier = 1.0
+        macdh_norm_thold = 0.0
         target_thold = 0.0025
 
         last_candle = candles_df.iloc[-1]
         target = last_candle['TARGET']
-        self.take_profit = target * tp_multiplier
-        self.stop_loss = target * sl_multiplier
 
         macd_change_cum = last_candle["MACD_CHANGE_CUM"]
         macdh_norm = last_candle[macdh_norm_col]
@@ -133,12 +128,12 @@ class MacdDiff(DirectionalStrategyBase):
 
             lines.extend(["\n Execution Summary"])
             lines.extend([f"Net Profit: {net_profit:.2f}"])
+            # TODO: add total traded volume
             lines.extend([f"N° Transactions: {total_executors}"])
             lines.extend([f"% Profitable: {(total_positive_entries / total_executors):.2f}"])
             lines.extend([f"Profit factor: {(total_profit / total_loss if total_loss != 0 else 1):.2f}"])
             lines.extend([f"Avg Profit: {(net_profit / total_executors):.4f}"])
-            # TODO: register open_timestamp in position executor
-            lines.extend([f"Avg Minutes: #TODO: register open_timestamp in position executor"])
+            # TODO: register open_timestamp in position executor and calculate avg min
         return "\n".join(lines)
 
     def market_data_extra_info(self):
