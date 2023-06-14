@@ -116,6 +116,31 @@ class MacdDiff(DirectionalStrategyBase):
 
         return candles_df, macdh_col, macdh_norm_col
 
+    def format_status(self) -> str:
+        """
+                Positions summary
+        """
+        if not self.ready_to_trade:
+            return "Market connectors are not ready."
+        lines = []
+
+        if len(self.stored_executors) > 0:
+            net_profit = sum(x.net_pnl_quote for x in self.stored_executors)
+            total_executors = len(self.stored_executors)
+            total_positive_entries = sum(x.net_pnl_quote > 0 for x in self.stored_executors)
+            total_profit = sum(x.net_pnl_quote for x in self.stored_executors if x.net_pnl_quote > 0)
+            total_loss = sum(x.net_pnl_quote for x in self.stored_executors if x.net_pnl_quote < 0)
+
+            lines.extend(["\n Execution Summary"])
+            lines.extend([f"Net Profit: {net_profit:.2f}"])
+            lines.extend([f"N° Transactions: {total_executors}"])
+            lines.extend([f"% Profitable: {(total_positive_entries / total_executors):.2f}"])
+            lines.extend([f"Profit factor: {(total_profit / total_loss if total_loss != 0 else 1):.2f}"])
+            lines.extend([f"Avg Profit: {(net_profit / total_executors):.4f}"])
+            # TODO: register open_timestamp in position executor
+            lines.extend([f"Avg Minutes: #TODO: register open_timestamp in position executor"])
+        return "\n".join(lines)
+
     def market_data_extra_info(self):
         """
         Provides additional information about the market data.
