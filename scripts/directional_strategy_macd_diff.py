@@ -45,11 +45,12 @@ class MacdDiff(DirectionalStrategyBase):
     leverage = 20
 
     # Configure the parameters for the position
-    stop_loss: float = 0.0075
-    take_profit: float = 0.1
+    stop_loss: float = 0.01
+    take_profit: float = 0.01
     time_limit: int = 60 * 55
-    trailing_stop_activation_delta = 0.0016
-    trailing_stop_trailing_delta = 0.001
+    trailing_stop_activation_delta = 0.004
+    trailing_stop_trailing_delta = 0.002
+    tp_multiplier = sl_multiplier = 0.3
 
     candles = [CandlesFactory.get_candle(connector=exchange,
                                          trading_pair=trading_pair,
@@ -63,19 +64,20 @@ class MacdDiff(DirectionalStrategyBase):
             int: The trading signal (-1 for short, 0 for hold, 1 for long).
         """
         candles_df, macdh_col, macdh_norm_col = self.get_processed_df()
-        delta_macd_thold = 0.0008
+        delta_macd_thold = 0.0006
         macdh_norm_thold = 0.0
-        target_thold = 0.0025
+        target_thold = 0.0045
 
         last_candle = candles_df.iloc[-1]
-        target = last_candle['TARGET']
-
-        macd_change_cum = last_candle["MACD_CHANGE_CUM"]
+        macd_cum_diff = last_candle["MACD_CUM_DIFF"]
         macdh_norm = last_candle[macdh_norm_col]
+        target = last_candle['TARGET']
+        self.take_profit = target * self.tp_multiplier
+        self.stop_loss = target * self.sl_multiplier
 
-        if (macd_change_cum > delta_macd_thold) & (macdh_norm > macdh_norm_thold) & (target < target_thold):
+        if (macd_cum_diff > delta_macd_thold) & (macdh_norm > macdh_norm_thold) & (target > target_thold):
             signal_value = 1
-        elif (macd_change_cum < - delta_macd_thold) & (macdh_norm < - macdh_norm_thold) & (target < target_thold):
+        elif (macd_cum_diff < - delta_macd_thold) & (macdh_norm < - macdh_norm_thold) & (target > target_thold):
             signal_value = -1
         else:
             signal_value = 0
@@ -107,18 +109,17 @@ class MacdDiff(DirectionalStrategyBase):
         candles_df['MACD_DIFF'] = candles_df[macdh_norm_col].diff()
         candles_df['MACD_CHANGE'] = np.sign(candles_df['MACD_DIFF']) != np.sign(candles_df['MACD_DIFF'].shift())
         candles_df['MACD_CHANGE_ID'] = candles_df['MACD_CHANGE'].cumsum()
-        candles_df['MACD_CHANGE_CUM'] = candles_df.groupby('MACD_CHANGE_ID')['MACD_DIFF'].cumsum()
+        candles_df['MACD_CUM_DIFF'] = candles_df.groupby('MACD_CHANGE_ID')['MACD_DIFF'].cumsum()
 
         return candles_df, macdh_col, macdh_norm_col
 
-    def format_status(self) -> str:
+    def market_data_extra_info(self):
         """
-                Positions summary
+        Provides additional information about the market data.
+        Returns:
+            List[str]: A list of formatted strings containing market data information.
         """
-        if not self.ready_to_trade:
-            return "Market connectors are not ready."
         lines = []
-
         if len(self.stored_executors) > 0:
             net_profit = sum(x.net_pnl_quote for x in self.stored_executors)
             total_executors = len(self.stored_executors)
@@ -131,20 +132,7 @@ class MacdDiff(DirectionalStrategyBase):
             # TODO: add total traded volume
             lines.extend([f"N° Transactions: {total_executors}"])
             lines.extend([f"% Profitable: {(total_positive_entries / total_executors):.2f}"])
-            lines.extend([f"Profit factor: {(total_profit / total_loss if total_loss != 0 else 1):.2f}"])
+            if total_loss != 0:
+                lines.extend([f"Profit factor: {(total_profit / -total_loss):.2f}"])
             lines.extend([f"Avg Profit: {(net_profit / total_executors):.4f}"])
-            # TODO: register open_timestamp in position executor and calculate avg min
-        return "\n".join(lines)
-
-    def market_data_extra_info(self):
-        """
-        Provides additional information about the market data.
-        Returns:
-            List[str]: A list of formatted strings containing market data information.
-        """
-        candles_df, macdh_col, macdh_norm_col = self.get_processed_df()
-        lines = []
-        columns_to_show = ["timestamp", "open", "low", "high", "close", "volume", "TARGET", macdh_col, macdh_norm_col, "MACD_CHANGE_CUM"]
-        lines.extend([f"Candles: {self.candles[0].name} | Interval: {self.candles[0].interval}\n"])
-        lines.extend(self.candles_formatted_list(candles_df, columns_to_show))
         return lines
