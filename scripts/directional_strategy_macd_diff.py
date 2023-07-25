@@ -41,7 +41,6 @@ class MacdDiff(DirectionalStrategyBase):
     macdh_norm_col: str = None
     macdh_col: str = None
     directional_strategy_name: str = "MACD_DIFF_V1"
-    # Define the trading pair and exchange that we want to use and the csv where we are going to store the entries
     trading_pair: str = "DOGE-BUSD"
     exchange: str = "binance_perpetual"
     interval: str = "5m"
@@ -90,11 +89,6 @@ class MacdDiff(DirectionalStrategyBase):
         return signal_value
 
     def get_processed_df(self):
-        """
-        Retrieves the processed dataframe with MACD and Bollinger Bands values.
-        Returns:
-            pd.DataFrame: The processed dataframe with MACD and Bollinger Bands values.
-        """
         # Read candles
         candles_df = self.candles[0].candles_df
 
