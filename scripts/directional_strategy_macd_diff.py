@@ -37,6 +37,9 @@ class MacdDiff(DirectionalStrategyBase):
     Inherits from:
         DirectionalStrategyBase: Base class for creating directional strategies using the PositionExecutor.
     """
+
+    macdh_norm_col: str = None
+    macdh_col: str = None
     directional_strategy_name: str = "MACD_DIFF_V1"
     # Define the trading pair and exchange that we want to use and the csv where we are going to store the entries
     trading_pair: str = "DOGE-BUSD"
@@ -63,14 +66,14 @@ class MacdDiff(DirectionalStrategyBase):
         Returns:
             int: The trading signal (-1 for short, 0 for hold, 1 for long).
         """
-        candles_df, macdh_col, macdh_norm_col = self.get_processed_df()
+        candles_df = self.get_processed_df()
         delta_macd_thold = 0.0006
         macdh_norm_thold = 0.0
         target_thold = 0.0045
 
         last_candle = candles_df.iloc[-1]
         macd_cum_diff = last_candle["MACD_CUM_DIFF"]
-        macdh_norm = last_candle[macdh_norm_col]
+        macdh_norm = last_candle[self.macdh_norm_col]
         target = last_candle['TARGET']
         self.take_profit = target * self.tp_multiplier
         self.stop_loss = target * self.sl_multiplier
@@ -101,17 +104,17 @@ class MacdDiff(DirectionalStrategyBase):
         candles_df.ta.macd(fast=macd_fast, slow=macd_slow, signal=macd_signal, append=True)
 
         # Standardize column names
-        macdh_col = f"MACDh_{macd_fast}_{macd_slow}_{macd_signal}"
-        macdh_norm_col = f"MACDh_{macd_fast}_{macd_slow}_{macd_signal}_norm"
+        self.macdh_col = f"MACDh_{macd_fast}_{macd_slow}_{macd_signal}"
+        self.macdh_norm_col = f"MACDh_{macd_fast}_{macd_slow}_{macd_signal}_norm"
 
         # Add new metrics
-        candles_df[macdh_norm_col] = candles_df[macdh_col] / candles_df['close']
-        candles_df['MACD_DIFF'] = candles_df[macdh_norm_col].diff()
+        candles_df[self.macdh_norm_col] = candles_df[self.macdh_col] / candles_df['close']
+        candles_df['MACD_DIFF'] = candles_df[self.macdh_norm_col].diff()
         candles_df['MACD_CHANGE'] = np.sign(candles_df['MACD_DIFF']) != np.sign(candles_df['MACD_DIFF'].shift())
         candles_df['MACD_CHANGE_ID'] = candles_df['MACD_CHANGE'].cumsum()
         candles_df['MACD_CUM_DIFF'] = candles_df.groupby('MACD_CHANGE_ID')['MACD_DIFF'].cumsum()
 
-        return candles_df, macdh_col, macdh_norm_col
+        return candles_df
 
     def market_data_extra_info(self):
         """
@@ -120,6 +123,10 @@ class MacdDiff(DirectionalStrategyBase):
             List[str]: A list of formatted strings containing market data information.
         """
         lines = []
+        columns_to_show = ["timestamp", "open", "low", "high", "close", "volume", "TARGET", self.macdh_norm_col, self.macdh_col, "MACD_CUM_DIFF"]
+        candles_df = self.get_processed_df()
+        lines.extend([f"Candles: {self.candles[0].name} | Interval: {self.candles[0].interval}\n"])
+        lines.extend(self.candles_formatted_list(candles_df, columns_to_show))
         if len(self.stored_executors) > 0:
             net_profit = sum(x.net_pnl_quote for x in self.stored_executors)
             total_executors = len(self.stored_executors)
