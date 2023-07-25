@@ -51,7 +51,7 @@ class MacdDiff(DirectionalStrategyBase):
     time_limit: int = 60 * 55
     trailing_stop_activation_delta = 0.004
     trailing_stop_trailing_delta = 0.002
-    tp_multiplier = sl_multiplier = 0.3
+    tp_multiplier = sl_multiplier = 1
 
     candles = [CandlesFactory.get_candle(connector=exchange,
                                          trading_pair=trading_pair,
