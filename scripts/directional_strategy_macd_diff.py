@@ -44,6 +44,8 @@ class MacdDiff(DirectionalStrategyBase):
     # Define the trading pair and exchange that we want to use and the csv where we are going to store the entries
     trading_pair: str = "DOGE-BUSD"
     exchange: str = "binance_perpetual"
+    interval: str = "5m"
+
     order_amount_usd = Decimal("20")
     leverage = 20
 
@@ -57,7 +59,8 @@ class MacdDiff(DirectionalStrategyBase):
 
     candles = [CandlesFactory.get_candle(connector=exchange,
                                          trading_pair=trading_pair,
-                                         interval="5m", max_records=150)]
+                                         interval=interval,
+                                         max_records=150)]
     markets = {exchange: {trading_pair}}
 
     def get_signal(self):
