@@ -48,9 +48,6 @@ class MacdDiff(DirectionalStrategyBase):
     order_amount_usd = Decimal("20")
     leverage = 20
 
-    # Configure the parameters for the position
-    stop_loss: float = 0.01
-    take_profit: float = 0.01
     time_limit: int = 60 * 55
     trailing_stop_activation_delta = 0.004
     trailing_stop_trailing_delta = 0.002
