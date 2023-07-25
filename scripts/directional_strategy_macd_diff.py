@@ -38,8 +38,6 @@ class MacdDiff(DirectionalStrategyBase):
         DirectionalStrategyBase: Base class for creating directional strategies using the PositionExecutor.
     """
 
-    macdh_norm_col: str = None
-    macdh_col: str = None
     directional_strategy_name: str = "MACD_DIFF_V1"
     trading_pair: str = "DOGE-BUSD"
     exchange: str = "binance_perpetual"
@@ -52,6 +50,9 @@ class MacdDiff(DirectionalStrategyBase):
     trailing_stop_activation_delta = 0.004
     trailing_stop_trailing_delta = 0.002
     tp_multiplier = sl_multiplier = 1
+
+    macdh_norm_col: str = None
+    macdh_col: str = None
 
     candles = [CandlesFactory.get_candle(connector=exchange,
                                          trading_pair=trading_pair,
