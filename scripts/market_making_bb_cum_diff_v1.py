@@ -17,7 +17,7 @@ class MarketMakingBBandCumDiffV1(ScriptStrategyBase):
         trailing_stop_activation_price_delta=Decimal("0.002"),
         trailing_stop_trailing_delta=Decimal("0.0005")
     )
-    config_v2 = BBCumDiffV1Config(
+    config = BBCumDiffV1Config(
         exchange="binance_perpetual",
         trading_pair=trading_pair,
         order_levels=[
@@ -25,20 +25,14 @@ class MarketMakingBBandCumDiffV1(ScriptStrategyBase):
                        spread_factor=Decimal(0.5), order_refresh_time=60 * 5,
                        cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
             OrderLevel(level=1, side=TradeType.BUY, order_amount_usd=Decimal(30),
-                       spread_factor=Decimal(1.0), order_refresh_time=60 * 5,
-                       cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
-            OrderLevel(level=2, side=TradeType.BUY, order_amount_usd=Decimal(50),
-                       spread_factor=Decimal(2.0), order_refresh_time=60 * 5,
+                       spread_factor=Decimal(1.5), order_refresh_time=60 * 5,
                        cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
             OrderLevel(level=0, side=TradeType.SELL, order_amount_usd=Decimal(15),
                        spread_factor=Decimal(0.5), order_refresh_time=60 * 5,
                        cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
             OrderLevel(level=1, side=TradeType.SELL, order_amount_usd=Decimal(30),
-                       spread_factor=Decimal(1.0), order_refresh_time=60 * 5,
-                       cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
-            OrderLevel(level=2, side=TradeType.SELL, order_amount_usd=Decimal(50),
-                       spread_factor=Decimal(2.0), order_refresh_time=60 * 5,
-                       cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
+                       spread_factor=Decimal(1.5), order_refresh_time=60 * 5,
+                       cooldown_time=15, triple_barrier_conf=triple_barrier_conf)
         ],
         candles_config=[
             CandlesConfig(connector="binance_perpetual", trading_pair=trading_pair, interval="3m", max_records=1000),
@@ -46,7 +40,7 @@ class MarketMakingBBandCumDiffV1(ScriptStrategyBase):
         leverage=10,
         natr_length=21, macd_fast=12, macd_slow=26, macd_signal=9
     )
-    bb_cum_diff_v1 = BBCumDiffV1(config=config_v2)
+    bb_cum_diff_v1 = BBCumDiffV1(config=config)
 
     empty_markets = {}
     markets = bb_cum_diff_v1.update_strategy_markets_dict(empty_markets)
