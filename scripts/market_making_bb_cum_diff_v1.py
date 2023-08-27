@@ -12,7 +12,8 @@ from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 class MarketMakingBBandCumDiffV1(ScriptStrategyBase):
     trading_pair = "HBAR-USDT"
     triple_barrier_conf = TripleBarrierConf(
-        stop_loss=Decimal("0.03"), take_profit=Decimal("0.02"),
+        stop_loss=Decimal("0.015"),
+        take_profit=Decimal("0.02"),
         time_limit=60 * 60 * 24,
         trailing_stop_activation_price_delta=Decimal("0.002"),
         trailing_stop_trailing_delta=Decimal("0.0005")
@@ -21,24 +22,18 @@ class MarketMakingBBandCumDiffV1(ScriptStrategyBase):
         exchange="binance_perpetual",
         trading_pair=trading_pair,
         order_levels=[
-            OrderLevel(level=0, side=TradeType.BUY, order_amount_usd=Decimal(15),
-                       spread_factor=Decimal(0.5), order_refresh_time=60 * 5,
+            OrderLevel(level=0, side=TradeType.BUY, order_amount_usd=Decimal(30),
+                       spread_factor=Decimal(0.7), order_refresh_time=60 * 5,
                        cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
-            OrderLevel(level=1, side=TradeType.BUY, order_amount_usd=Decimal(30),
-                       spread_factor=Decimal(1.5), order_refresh_time=60 * 5,
-                       cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
-            OrderLevel(level=0, side=TradeType.SELL, order_amount_usd=Decimal(15),
-                       spread_factor=Decimal(0.5), order_refresh_time=60 * 5,
-                       cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
-            OrderLevel(level=1, side=TradeType.SELL, order_amount_usd=Decimal(30),
-                       spread_factor=Decimal(1.5), order_refresh_time=60 * 5,
+            OrderLevel(level=0, side=TradeType.SELL, order_amount_usd=Decimal(30),
+                       spread_factor=Decimal(0.7), order_refresh_time=60 * 5,
                        cooldown_time=15, triple_barrier_conf=triple_barrier_conf)
         ],
         candles_config=[
             CandlesConfig(connector="binance_perpetual", trading_pair=trading_pair, interval="3m", max_records=1000),
         ],
         leverage=10,
-        natr_length=21, macd_fast=12, macd_slow=26, macd_signal=9
+        natr_length=21
     )
     bb_cum_diff_v1 = BBCumDiffV1(config=config)
 
