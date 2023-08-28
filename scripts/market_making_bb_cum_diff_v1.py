@@ -15,8 +15,8 @@ class MarketMakingBBandCumDiffV1(ScriptStrategyBase):
         stop_loss=Decimal("0.015"),
         take_profit=Decimal("0.02"),
         time_limit=60 * 60 * 24,
-        trailing_stop_activation_price_delta=Decimal("0.002"),
-        trailing_stop_trailing_delta=Decimal("0.0005")
+        trailing_stop_activation_price_delta=Decimal("0.01"),
+        trailing_stop_trailing_delta=Decimal("0.002")
     )
     config = BBCumDiffV1Config(
         exchange="binance_perpetual",
