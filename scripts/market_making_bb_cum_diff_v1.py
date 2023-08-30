@@ -12,10 +12,10 @@ from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 class MarketMakingBBandCumDiffV1(ScriptStrategyBase):
     trading_pair = "HBAR-USDT"
     triple_barrier_conf = TripleBarrierConf(
-        stop_loss=Decimal("0.015"),
+        stop_loss=Decimal("0.02"),
         take_profit=Decimal("0.02"),
-        time_limit=60 * 60 * 24,
-        trailing_stop_activation_price_delta=Decimal("0.01"),
+        time_limit=60 * 60 * 1,
+        trailing_stop_activation_price_delta=Decimal("0.007"),
         trailing_stop_trailing_delta=Decimal("0.002")
     )
     config = BBCumDiffV1Config(
