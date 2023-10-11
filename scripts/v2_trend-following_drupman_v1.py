@@ -25,7 +25,7 @@ def get_order_levels(trading_pairs: list[str],
                         [
                             OrderLevel(level=i,
                                        side=TradeType.BUY,
-                                       order_amount_usd=Decimal("5"),
+                                       order_amount_usd=Decimal("10"),
                                        spread_factor=i / n_levels * max_price_pct_expectation,
                                        order_refresh_time=60 * 60,
                                        cooldown_time=15,
@@ -44,7 +44,7 @@ def get_order_levels(trading_pairs: list[str],
                         + [
                             OrderLevel(level=i,
                                        side=TradeType.SELL,
-                                       order_amount_usd=Decimal("5"),
+                                       order_amount_usd=Decimal("10"),
                                        spread_factor=i / n_levels * max_price_pct_expectation,
                                        order_refresh_time=60 * 60,
                                        cooldown_time=15,
@@ -76,8 +76,8 @@ class TrendGridMultiplePairs(ScriptStrategyBase):
 
     # This is only for the perpetual markets
     leverage_by_trading_pair = {
-        "HBAR-USDT": 5,
-        "BCH-USDT": 5,
+        "HBAR-USDT": 10,
+        "BCH-USDT": 10,
         # "CYBER-USDT": 20,
         # "ETH-USDT": 100,
         # "LPT-USDT": 10,
@@ -94,13 +94,13 @@ class TrendGridMultiplePairs(ScriptStrategyBase):
         # "HOOK-USDT": 20,
         # "AMB-USDT": 20,
         # "ARKM-USDT": 20,
-        "TRB-USDT": 5,
+        "TRB-USDT": 10,
         # "OMG-USDT": 25,
-        "WLD-USDT": 5,
+        "WLD-USDT": 10,
         # "PEOPLE-USDT": 25,
         # "AGLD-USDT": 20,
         # "BAT-USDT": 20,
-        "LINK-USDT": 5,
+        "LINK-USDT": 10,
     }
 
     order_levels_by_trading_pair = get_order_levels(trading_pairs=trading_pairs,
