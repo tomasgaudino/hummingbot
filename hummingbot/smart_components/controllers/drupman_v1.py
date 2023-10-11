@@ -76,7 +76,7 @@ class DrupmanV1(MarketMakingControllerBase):
         long_signal = macd_hist > self.config.macdh_thold and macd < - self.config.macd_thold and side_multiplier == 1
         short_signal = macd_hist < self.config.macdh_thold and macd > self.config.macd_thold and side_multiplier == -1
         order_price = close_price * (1 + order_level.spread_factor * side_multiplier)
-        if (long_signal and order_price >= close_price) or (short_signal and order_price <= close_price):
+        if (long_signal and close_price >= order_price) or (short_signal and close_price <= order_price):
             if order_level.triple_barrier_conf.trailing_stop_trailing_delta and order_level.triple_barrier_conf.trailing_stop_trailing_delta:
                 trailing_stop = TrailingStop(
                     activation_price_delta=order_level.triple_barrier_conf.trailing_stop_activation_price_delta,
