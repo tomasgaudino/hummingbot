@@ -2,7 +2,7 @@ version: "3.9"
 services:
   bot:
     container_name: dman_v3
-    image: hummingbot/humminbgot:development
+    image: hummingbot/hummingbot:development
     volumes:
     - ./hummingbot_files/conf:/home/hummingbot/conf
     - ./hummingbot_files/conf/connectors:/home/hummingbot/conf/connectors
