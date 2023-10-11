@@ -4,7 +4,7 @@ from typing import Dict
 from hummingbot.connector.connector_base import ConnectorBase, TradeType
 from hummingbot.core.data_type.common import OrderType, PositionAction, PositionSide
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesConfig
-from hummingbot.smart_components.controllers.bollingrid import BollingGrid, BollingGridConfig
+from hummingbot.smart_components.controllers.drupman_v1 import DrupmanV1, DrupmanV1Config
 from hummingbot.smart_components.strategy_frameworks.data_types import (
     ExecutorHandlerStatus,
     OrderLevel,
@@ -16,83 +16,115 @@ from hummingbot.smart_components.strategy_frameworks.market_making.market_making
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 
 
-class BollinGridMultiplePairs(ScriptStrategyBase):
-    trading_pairs = ["TRB-USDT"]
+def get_order_levels(trading_pairs: list[str],
+                     n_levels: int,
+                     max_price_pct_expectation: float,
+                     sl_spread_pct: float,
+                     tsl_spread_pct: float):
+    order_levels = {trading_pair:
+                        [
+                            OrderLevel(level=i,
+                                       side=TradeType.BUY,
+                                       order_amount_usd=Decimal("5"),
+                                       spread_factor=i / n_levels * max_price_pct_expectation,
+                                       order_refresh_time=60 * 60,
+                                       cooldown_time=15,
+                                       triple_barrier_conf=TripleBarrierConf(
+                                           stop_loss=sl_spread_pct,
+                                           take_profit=Decimal("99"),
+                                           time_limit=60 * 60 * 12,
+                                           take_profit_order_type=OrderType.MARKET,
+                                           trailing_stop_activation_price_delta=max_price_pct_expectation / n_levels,
+                                           trailing_stop_trailing_delta=tsl_spread_pct * max_price_pct_expectation / n_levels,
+                                           open_order_type=OrderType.MARKET,
+                                       )
+                                       )
+                            for i in range(1, n_levels + 1)
+                        ]
+                        + [
+                            OrderLevel(level=i,
+                                       side=TradeType.SELL,
+                                       order_amount_usd=Decimal("5"),
+                                       spread_factor=i / n_levels * max_price_pct_expectation,
+                                       order_refresh_time=60 * 60,
+                                       cooldown_time=15,
+                                       triple_barrier_conf=TripleBarrierConf(
+                                           stop_loss=sl_spread_pct,
+                                           take_profit=Decimal("99"),
+                                           time_limit=60 * 60 * 12,
+                                           take_profit_order_type=OrderType.MARKET,
+                                           open_order_type=OrderType.MARKET,
+                                           trailing_stop_activation_price_delta=n_levels * max_price_pct_expectation,
+                                           trailing_stop_trailing_delta=tsl_spread_pct,
+                                       )
+                                       )
+                            for i in range(1, n_levels + 1)
+                        ]
+                        for trading_pair in trading_pairs
+    }
+    return order_levels
+
+
+class TrendGridMultiplePairs(ScriptStrategyBase):
+    trading_pairs = ["TRB-USDT", "BCH-USDT", "LINK-USDT", "WLD-USDT", "HBAR-USDT"]
     exchange = "binance_perpetual"
+    max_price_pct_expectation = 0.05
+    n_levels = 5
+    # sl needs to be greater than tsl since the tsl activation is at same price of next level start
+    sl_spread_pct = 0.5
+    tsl_spread_pct = 0.3
 
     # This is only for the perpetual markets
     leverage_by_trading_pair = {
-        "HBAR-USDT": 25,
-        "CYBER-USDT": 20,
-        "ETH-USDT": 100,
-        "LPT-USDT": 10,
-        "UNFI-USDT": 20,
-        "BAKE-USDT": 20,
-        "YGG-USDT": 20,
-        "SUI-USDT": 50,
-        "TOMO-USDT": 25,
-        "RUNE-USDT": 25,
-        "STX-USDT": 25,
-        "API3-USDT": 20,
-        "LIT-USDT": 20,
-        "PERP-USDT": 16,
-        "HOOK-USDT": 20,
-        "AMB-USDT": 20,
-        "ARKM-USDT": 20,
-        "TRB-USDT": 10,
-        "OMG-USDT": 25,
-        "WLD-USDT": 50,
-        "PEOPLE-USDT": 25,
-        "AGLD-USDT": 20,
-        "BAT-USDT": 20
+        "HBAR-USDT": 5,
+        "BCH-USDT": 5,
+        # "CYBER-USDT": 20,
+        # "ETH-USDT": 100,
+        # "LPT-USDT": 10,
+        # "UNFI-USDT": 20,
+        # "BAKE-USDT": 20,
+        # "YGG-USDT": 20,
+        # "SUI-USDT": 50,
+        # "TOMO-USDT": 25,
+        # "RUNE-USDT": 25,
+        # "STX-USDT": 25,
+        # "API3-USDT": 20,
+        # "LIT-USDT": 20,
+        # "PERP-USDT": 16,
+        # "HOOK-USDT": 20,
+        # "AMB-USDT": 20,
+        # "ARKM-USDT": 20,
+        "TRB-USDT": 5,
+        # "OMG-USDT": 25,
+        "WLD-USDT": 5,
+        # "PEOPLE-USDT": 25,
+        # "AGLD-USDT": 20,
+        # "BAT-USDT": 20,
+        "LINK-USDT": 5,
     }
 
-    triple_barrier_conf = TripleBarrierConf(
-        stop_loss=Decimal("0.15"), take_profit=Decimal("0.02"),
-        time_limit=60 * 60 * 12,
-        take_profit_order_type=OrderType.LIMIT,
-        trailing_stop_activation_price_delta=Decimal("0.005"),
-        trailing_stop_trailing_delta=Decimal("0.002"),
-    )
-
-    order_levels = [
-        OrderLevel(level=1, side=TradeType.BUY, order_amount_usd=Decimal("10"),
-                   spread_factor=Decimal(0.5), order_refresh_time=60 * 5,
-                   cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
-        OrderLevel(level=2, side=TradeType.BUY, order_amount_usd=Decimal("20"),
-                   spread_factor=Decimal(1.0), order_refresh_time=60 * 5,
-                   cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
-        OrderLevel(level=3, side=TradeType.BUY, order_amount_usd=Decimal("30"),
-                   spread_factor=Decimal(1.5), order_refresh_time=60 * 5,
-                   cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
-
-        OrderLevel(level=1, side=TradeType.SELL, order_amount_usd=Decimal("10"),
-                   spread_factor=Decimal(0.5), order_refresh_time=60 * 5,
-                   cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
-        OrderLevel(level=2, side=TradeType.SELL, order_amount_usd=Decimal("20"),
-                   spread_factor=Decimal(1.0), order_refresh_time=60 * 5,
-                   cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
-        OrderLevel(level=3, side=TradeType.SELL, order_amount_usd=Decimal("30"),
-                   spread_factor=Decimal(1.5), order_refresh_time=60 * 5,
-                   cooldown_time=15, triple_barrier_conf=triple_barrier_conf),
-    ]
+    order_levels_by_trading_pair = get_order_levels(trading_pairs=trading_pairs,
+                                                    n_levels=n_levels,
+                                                    max_price_pct_expectation=max_price_pct_expectation,
+                                                    sl_spread_pct=sl_spread_pct,
+                                                    tsl_spread_pct=tsl_spread_pct)
     controllers = {}
     markets = {}
     executor_handlers = {}
 
     for trading_pair in trading_pairs:
-        config = BollingGridConfig(
+        config = DrupmanV1Config(
             exchange=exchange,
             trading_pair=trading_pair,
-            order_levels=order_levels,
+            order_levels=order_levels_by_trading_pair[trading_pair],
             candles_config=[
                 CandlesConfig(connector=exchange, trading_pair=trading_pair, interval="15m", max_records=300),
             ],
-            bb_length=200,
-            bb_std=3.0,
+            bb_length=100,
+            bb_std=2.0,
             leverage=leverage_by_trading_pair.get(trading_pair, 1),
         )
-        controller = BollingGrid(config=config)
+        controller = DrupmanV1(config=config)
         markets = controller.update_strategy_markets_dict(markets)
         controllers[trading_pair] = controller
 
@@ -139,9 +171,10 @@ class BollinGridMultiplePairs(ScriptStrategyBase):
         market conditions, you can orchestrate from this script when to stop or start them.
         """
         for executor_handler in self.executor_handlers.values():
-            if executor_handler.status == ExecutorHandlerStatus.NOT_STARTED:
+            if self.tsl_spread_pct >= self.sl_spread_pct:
+                self.logger().error("TSL spread needs to be lower than SL spread")
+            elif executor_handler.status == ExecutorHandlerStatus.NOT_STARTED:
                 executor_handler.start()
-
 
     def format_status(self) -> str:
         if not self.ready_to_trade:
