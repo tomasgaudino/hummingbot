@@ -40,7 +40,12 @@ class TrendFollowerV1Config(MarketMakingControllerConfigBase):
 class TrendFollowerV1(MarketMakingControllerBase):
     def __init__(self, config: TrendFollowerV1Config):
         super().__init__(config)
+        self.target_prices = {}
         self.config = config
+
+    @property
+    def order_levels_targets(self):
+        return self.target_prices
 
     def refresh_order_condition(self, executor: PositionExecutor, order_level: OrderLevelFixed) -> bool:
         """
@@ -89,23 +94,9 @@ class TrendFollowerV1(MarketMakingControllerBase):
         # This side multiplier is only to get the correct bollingrid side
         side_multiplier = 1 if order_level.side == TradeType.BUY else -1
         order_price = bollinger_mid_price * (1 + order_level.spread_factor * spread_multiplier * side_multiplier)
-
-        # Avoid placing the order from the opposite side
-        side_filter_condition = self.config.side_filter and (
-            (close_price < bollinger_mid_price and order_level.side == TradeType.BUY) or
-            (close_price > bollinger_mid_price and order_level.side == TradeType.SELL))
-        if side_filter_condition:
-            return
-
-        # Smart activation of orders
         tolerance = self.config.activation_threshold * spread_multiplier
-        upper_limit = order_price * (1 + tolerance)
-        lower_limit = order_price * (1 - tolerance)
-        smart_activation_condition = self.config.smart_activation and math.isclose(close_price, order_price,
-                                                                                   rel_tol=tolerance)
-        if not smart_activation_condition:
-            return
-
+        order_upper_limit = order_price * (1 + tolerance)
+        order_lower_limit = order_price * (1 - tolerance)
         # This side will replace the original order level side if the order is placed from the opposite side
         if close_price < order_price * (1 + tolerance):
             fixed_side = TradeType.BUY
@@ -114,17 +105,37 @@ class TrendFollowerV1(MarketMakingControllerBase):
         else:
             fixed_side = order_level.side
 
+        # Avoid placing the order from the opposite side
+        side_filter_condition = self.config.side_filter and (
+            (close_price < bollinger_mid_price and order_level.side == TradeType.BUY) or
+            (close_price > bollinger_mid_price and order_level.side == TradeType.SELL))
+        if side_filter_condition:
+            return
+
+        # Update target prices for format status
+        self.target_prices[f"{order_level.level}"] = {"side": fixed_side,
+                                                      "close_price": close_price,
+                                                      "upper_limit": order_upper_limit,
+                                                      "order_price": order_price,
+                                                      "lower_limit": order_lower_limit}
+
+        # Smart activation of orders
+        smart_activation_condition = self.config.smart_activation and math.isclose(close_price, order_price,
+                                                                                   rel_tol=tolerance)
+        if not smart_activation_condition:
+            return
+
         # Dynamic trailing stop
         target_spread = spread_multiplier if self.config.dynamic_target_spread else 1
-        if order_level.triple_barrier_conf.trailing_stop_trailing_delta and order_level.triple_barrier_conf.trailing_stop_trailing_delta:
-            trailing_stop = TrailingStop(
-                activation_price_delta=order_level.triple_barrier_conf.trailing_stop_activation_price_delta * target_spread,
-                trailing_delta=order_level.triple_barrier_conf.trailing_stop_trailing_delta * target_spread,
-            )
-        else:
-            trailing_stop = None
 
         if fixed_side == order_level.side:
+            if order_level.next_triple_barrier_conf.trailing_stop_trailing_delta and order_level.next_triple_barrier_conf.trailing_stop_trailing_delta:
+                trailing_stop = TrailingStop(
+                    activation_price_delta=order_level.next_triple_barrier_conf.trailing_stop_activation_price_delta * target_spread,
+                    trailing_delta=order_level.next_triple_barrier_conf.trailing_stop_trailing_delta * target_spread,
+                )
+            else:
+                trailing_stop = None
             position_config = PositionConfig(
                 timestamp=time.time(),
                 trading_pair=self.config.trading_pair,
@@ -141,6 +152,13 @@ class TrendFollowerV1(MarketMakingControllerBase):
                 leverage=self.config.leverage
             )
         else:
+            if order_level.prev_triple_barrier_conf.trailing_stop_trailing_delta and order_level.prev_triple_barrier_conf.trailing_stop_trailing_delta:
+                trailing_stop = TrailingStop(
+                    activation_price_delta=order_level.prev_triple_barrier_conf.trailing_stop_activation_price_delta * target_spread,
+                    trailing_delta=order_level.prev_triple_barrier_conf.trailing_stop_trailing_delta * target_spread,
+                )
+            else:
+                trailing_stop = None
             position_config = PositionConfig(
                 timestamp=time.time(),
                 trading_pair=self.config.trading_pair,
