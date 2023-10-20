@@ -16,6 +16,53 @@ from hummingbot.smart_components.strategy_frameworks.market_making.market_making
 )
 from hummingbot.smart_components.utils.order_level_builder import OrderLevelBuilder
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
+from hummingbot.smart_components.strategy_frameworks.data_types import OrderLevel, TripleBarrierConf
+
+
+class OrderLevelFixed(OrderLevel):
+    level: int
+    side: TradeType
+    order_amount_usd: Decimal
+    spread_factor: Decimal = Decimal("0.0")
+    order_refresh_time: int = 60
+    cooldown_time: int = 0
+    next_triple_barrier_conf: TripleBarrierConf
+    prev_triple_barrier_conf: TripleBarrierConf
+    triple_barrier_conf: TripleBarrierConf = None
+
+
+class OrderLevelBuilderFixed(OrderLevelBuilder):
+    def __init__(self, n_levels: int):
+        super().__init__(n_levels)
+
+    def build_order_levels(self,
+                           sides: List[TradeType],
+                           amounts: Union[Decimal, List[Decimal], Dict[str, Any]],
+                           spreads: Union[Decimal, List[Decimal], Dict[str, Any]],
+                           triple_barrier_configs: Union[TripleBarrierConf, List[TripleBarrierConf]]) -> List[OrderLevelFixed]:
+        resolved_amounts = self._resolve_input(amounts)
+        resolved_spreads = self._resolve_input(spreads)
+        next_triple_barrier_configs = triple_barrier_configs["next"]
+        prev_triple_barrier_configs = triple_barrier_configs["prev"]
+        if not isinstance(next_triple_barrier_configs, list):
+            next_triple_barrier_configs = [next_triple_barrier_configs] * self.n_levels
+
+        if not isinstance(prev_triple_barrier_configs, list):
+            prev_triple_barrier_configs = [prev_triple_barrier_configs] * self.n_levels
+
+        order_levels = []
+        for i in range(self.n_levels):
+            for side in sides:
+                order_level = OrderLevelFixed(
+                    level=i + 1,
+                    side=side,
+                    order_amount_usd=Decimal(resolved_amounts[i]),
+                    spread_factor=Decimal(resolved_spreads[i]),
+                    next_triple_barrier_conf=next_triple_barrier_configs[i],  # Replace triple_barrier_conf
+                    prev_triple_barrier_conf=prev_triple_barrier_configs[i]  # New input
+                )
+                order_levels.append(order_level)
+        return order_levels
 
 
 def build_levels_tf(n_levels=8,
@@ -26,33 +73,64 @@ def build_levels_tf(n_levels=8,
                     stop_loss_factor=0.5,
                     time_limit=60 * 60 * 24 * 1,
                     open_order_type=OrderType.MARKET):
-    order_level_builder = OrderLevelBuilder(n_levels=n_levels)
+    order_level_builder = OrderLevelBuilderFixed(n_levels=n_levels)
     spreads = order_level_builder._resolve_input(
         {"method": "exponential",
          "params": {"base": exp_factor, "initial_value": initial_value}
          }
     )
-    triple_barrier_confs = []
+    next_triple_barrier_confs = []
+    prev_triple_barrier_confs = []
+
     for i, spread in enumerate(spreads):
         try:
             next_spread_factor = spreads[i + 1]
         except:
             next_spread_factor = spread * exp_factor
 
-        trailing_stop_activation_price = next_spread_factor - spread
-        trailing_stop_trailing_delta = (next_spread_factor - spread) * trailing_stop_factor
-        stop_loss = (next_spread_factor - spread) * stop_loss_factor
-        triple_barrier_config = TripleBarrierConf(
-            stop_loss=Decimal(stop_loss),
+        next_gap = next_spread_factor - spread
+
+        next_trailing_stop_activation_price = next_gap
+        next_trailing_stop_trailing_delta = next_gap * trailing_stop_factor
+        next_stop_loss = next_gap * stop_loss_factor
+        next_triple_barrier_config = TripleBarrierConf(
+            stop_loss=Decimal(next_stop_loss),
             time_limit=time_limit,
             take_profit=Decimal(take_profit_factor),
-            trailing_stop_activation_price_delta=Decimal(trailing_stop_activation_price),
-            trailing_stop_trailing_delta=Decimal(trailing_stop_trailing_delta),
+            trailing_stop_activation_price_delta=Decimal(next_trailing_stop_activation_price),
+            trailing_stop_trailing_delta=Decimal(next_trailing_stop_trailing_delta),
             open_order_type=open_order_type,
         )
-        triple_barrier_confs.append(triple_barrier_config)
+        next_triple_barrier_confs.append(next_triple_barrier_config)
+
+        if i > 0:
+            prev_spread_factor = spreads[i - 1]
+        else:
+            prev_spread_factor = spread * 0.5
+
+        prev_gap = spread - prev_spread_factor
+
+        prev_trailing_stop_activation_price = prev_gap
+        prev_trailing_stop_trailing_delta = prev_gap * trailing_stop_factor
+        prev_stop_loss = prev_gap * stop_loss_factor
+        prev_triple_barrier_config = TripleBarrierConf(
+            stop_loss=Decimal(prev_stop_loss),
+            time_limit=time_limit,
+            take_profit=Decimal(take_profit_factor),
+            trailing_stop_activation_price_delta=Decimal(prev_trailing_stop_activation_price),
+            trailing_stop_trailing_delta=Decimal(prev_trailing_stop_trailing_delta),
+            open_order_type=open_order_type,
+        )
+        prev_triple_barrier_confs.append(prev_triple_barrier_config)
+
+    triple_barrier_confs = {
+        "next": next_triple_barrier_confs,
+        "prev": prev_triple_barrier_confs
+
+    }
+
     levels = order_level_builder.build_order_levels(sides=[TradeType.BUY, TradeType.SELL], amounts=Decimal("10"),
-                                                    spreads=spreads, triple_barrier_confs=triple_barrier_confs)
+                                                    spreads=spreads, triple_barrier_configs=triple_barrier_confs)
     return levels
 
 
