@@ -260,4 +260,8 @@ class TrendFollowerV1MultiplePairs(ScriptStrategyBase):
             lines.extend(
                 [f"Strategy: {executor_handler.controller.config.strategy_name} | Trading Pair: {trading_pair}",
                  executor_handler.to_format_status()])
+            lines.extend([""])
+            lines.extend(
+                [f"Level {order_level}: Side: {prices['side']} - Close: {prices['close_price']:.3f} - Lower: {prices['lower_limit']:.3f} - Order: {prices['order_price']:.3f} - Upper: {prices['upper_limit']:.3f}" for order_level, prices in executor_handler.controller.target_prices.items()]
+            )
         return "\n".join(lines)
