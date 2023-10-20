@@ -4,7 +4,6 @@ from typing import Dict, List, Union, Any
 from hummingbot.connector.connector_base import ConnectorBase, TradeType
 from hummingbot.core.data_type.common import OrderType, PositionSide, PositionAction
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesConfig
-from hummingbot.smart_components.controllers.dman_v3 import DManV3, DManV3Config
 from hummingbot.smart_components.controllers.trend_follower_v1 import TrendFollowerV1, TrendFollowerV1Config
 from hummingbot.smart_components.strategy_frameworks.data_types import (
     ExecutorHandlerStatus,
@@ -135,8 +134,8 @@ def build_levels_tf(n_levels=8,
 
 
 class TrendFollowerV1MultiplePairs(ScriptStrategyBase):
-    trading_pairs = ["BNX-USDT", "BNT-USDT", "IOTA-USDT", "WLD-USDT"]
-    # trading_pairs = ["BNX-USDT"]
+    # trading_pairs = ["BNX-USDT", "BNT-USDT", "IOTA-USDT", "WLD-USDT"]
+    trading_pairs = ["TRB-USDT"]
 
     exchange = "binance_perpetual"
 
@@ -174,9 +173,9 @@ class TrendFollowerV1MultiplePairs(ScriptStrategyBase):
         "BNT-USDT": 20,
     }
 
-    order_levels_tf = build_levels_tf(n_levels=8,
+    order_levels_tf = build_levels_tf(n_levels=11,
                                       initial_value=0.3,
-                                      exp_factor=1.25,
+                                      exp_factor=1.2,
                                       trailing_stop_factor=0.3,
                                       stop_loss_factor=0.5,
                                       time_limit=60 * 60 * 24 * 1,
@@ -195,7 +194,7 @@ class TrendFollowerV1MultiplePairs(ScriptStrategyBase):
                 CandlesConfig(connector=exchange, trading_pair=trading_pair, interval="1h", max_records=300),
             ],
             bb_length=200,
-            bb_std=3.0,
+            bb_std=2.0,
             side_filter=True,
             smart_activation=True,
             dynamic_target_spread=True,
