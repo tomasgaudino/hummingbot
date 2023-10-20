@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Dict
+from typing import Dict, List, Union, Any
 
 from hummingbot.connector.connector_base import ConnectorBase, TradeType
 from hummingbot.core.data_type.common import OrderType, PositionSide, PositionAction
