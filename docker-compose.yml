@@ -1,47 +1,28 @@
 version: "3.9"
 services:
-  hummingbot:
+  bot:
     container_name: hummingbot
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: price-follower:latest
     volumes:
-      - ./conf:/home/hummingbot/conf
-      - ./conf/connectors:/home/hummingbot/conf/connectors
-      - ./conf/strategies:/home/hummingbot/conf/strategies
-      - ./logs:/home/hummingbot/logs
-      - ./data:/home/hummingbot/data
-      - ./scripts:/home/hummingbot/scripts
+    - ./hummingbot_files/conf:/home/hummingbot/conf
+    - ./hummingbot_files/conf/connectors:/home/hummingbot/conf/connectors
+    - ./hummingbot_files/conf/strategies:/home/hummingbot/conf/strategies
+    - ./hummingbot_files/logs:/home/hummingbot/logs
+    - ./hummingbot_files/data:/home/hummingbot/data
+    - ./hummingbot_files/scripts:/home/hummingbot/scripts
+    - ./hummingbot_files/controllers:/home/hummingbot/hummingbot/smart_components/controllers
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+#    environment:
+#      - CONFIG_PASSWORD=a
+#      - CONFIG_FILE_NAME=v2_trend-following_drupman_v1.py
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
-        max-file: "5"
+          max-size: "10m"
+          max-file: 5
     tty: true
     stdin_open: true
-    network_mode: host
-    #  environment:
-    #    - CONFIG_PASSWORD=a
-    #    - CONFIG_FILE_NAME=simple_pmm_example.py
-
-  # dashboard:
-  #   container_name: dashboard
-  #   image: hummingbot/dashboard:latest
-  #   volumes:
-  #     - ./data:/home/dashboard/data
-  #   ports:
-  #     - "8501:8501"
-
-  # gateway:
-  #   container_name: gateway
-  #   image: hummingbot/gateway:latest
-  #   ports:
-  #     - "15888:15888"
-  #     - "8080:8080"
-  #   volumes:
-  #     - "./gateway_files/conf:/home/gateway/conf"
-  #     - "./gateway_files/logs:/home/gateway/logs"
-  #     - "./gateway_files/db:/home/gateway/db"
-  #     - "./certs:/home/gateway/certs"
-  #   environment:
-  #     - GATEWAY_PASSPHRASE=a
