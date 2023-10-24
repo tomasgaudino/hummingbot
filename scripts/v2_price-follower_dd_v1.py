@@ -17,8 +17,8 @@ from hummingbot.client.ui.interface_utils import format_df_for_printout
 
 class PriceFollowerV1MultiplePairs(ScriptStrategyBase):
     # Define trading pairs where you will be trading
-    # trading_pairs = ["TRB-USDT", "BNX-USDT", "BNT-USDT"]
-    trading_pairs = ["TRB-USDT"]
+    trading_pairs = ["TRB-USDT", "BNX-USDT", "BNT-USDT"]
+    # trading_pairs = ["TRB-USDT"]
 
     # Select your favourite exchange
     exchange = "binance_perpetual"
