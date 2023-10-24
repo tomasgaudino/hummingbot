@@ -13,7 +13,7 @@ from hummingbot.smart_components.strategy_frameworks.market_making.market_making
 )
 
 
-class TrendFollowerV1Config(MarketMakingControllerConfigBase):
+class PriceFollowerV1Config(MarketMakingControllerConfigBase):
     strategy_name: str = "trend_follower_v1"
     bb_length: int = 100
     bb_std: float = 2.0
@@ -24,8 +24,8 @@ class TrendFollowerV1Config(MarketMakingControllerConfigBase):
     intra_spread_pct: float = 0.005
 
 
-class TrendFollowerV1(MarketMakingControllerBase):
-    def __init__(self, config: TrendFollowerV1Config):
+class PriceFollowerV1(MarketMakingControllerBase):
+    def __init__(self, config: PriceFollowerV1Config):
         super().__init__(config)
         self.target_prices = {}
         self.config = config
