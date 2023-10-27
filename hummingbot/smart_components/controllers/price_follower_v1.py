@@ -21,7 +21,6 @@ class PriceFollowerV1Config(MarketMakingControllerConfigBase):
     smart_activation: bool = False
     debug_mode: bool = False
     activation_threshold: Decimal = Decimal("0.001")
-    dynamic_target_spread: bool = False
     intra_spread_pct: float = 0.005
 
 
