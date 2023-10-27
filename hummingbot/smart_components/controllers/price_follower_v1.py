@@ -19,6 +19,7 @@ class PriceFollowerV1Config(MarketMakingControllerConfigBase):
     bb_std: float = 2.0
     side_filter: bool = False
     smart_activation: bool = False
+    debug_mode: bool = False
     activation_threshold: Decimal = Decimal("0.001")
     dynamic_target_spread: bool = False
     intra_spread_pct: float = 0.005
@@ -162,6 +163,10 @@ class PriceFollowerV1(MarketMakingControllerBase):
                 fixed_side == TradeType.SELL and order_upper_limit >= close_price >= order_price
         )
         if not smart_activation_condition:
+            return
+
+        # This option is set to avoid placing orders during debugging
+        if self.config.debug_mode:
             return
 
         # Mark as active
