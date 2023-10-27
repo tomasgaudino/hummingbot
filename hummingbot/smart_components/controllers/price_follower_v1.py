@@ -22,6 +22,7 @@ class PriceFollowerV1Config(MarketMakingControllerConfigBase):
     debug_mode: bool = False
     activation_threshold: Decimal = Decimal("0.001")
     intra_spread_pct: float = 0.005
+    min_price_pct_between_levels: float = 0.01
 
 
 class PriceFollowerV1(MarketMakingControllerBase):
@@ -30,10 +31,6 @@ class PriceFollowerV1(MarketMakingControllerBase):
         self.target_prices = {}
         self.config = config
         self.price_pct_between_levels: float = 0.0
-        self.take_profit_pct = None
-        self.stop_loss_pct: float = None
-        self.trailing_stop_activation_pct: float = None
-        self.trailing_stop_trailing_pct: float = None
 
     @property
     def order_levels_targets(self):
@@ -99,61 +96,57 @@ class PriceFollowerV1(MarketMakingControllerBase):
         # Get bollinger mid-price and spread multiplier
         bollinger_mid_price, spread_multiplier = self.get_price_and_spread_multiplier()
 
+        # Get liquidation pct
+        liquidation_pct = 1 / self.config.leverage
+
         # This side multiplier is only to get the correct bollingrid side
-        side_multiplier = 1 if order_level.side == TradeType.BUY else -1
+        bollinger_side_multiplier = 1 if order_level.side == TradeType.BUY else -1
+        side_name = "UPPER" if order_level.side == TradeType.BUY else "LOWER"
 
-        # Avoid placing the order from the opposite side
-        side_filter_condition = self.config.side_filter and (
-                (close_price < bollinger_mid_price and order_level.side == TradeType.BUY) or
-                (close_price > bollinger_mid_price and order_level.side == TradeType.SELL))
-        if side_filter_condition:
-            return
+        # Calculate order price
+        order_price = bollinger_mid_price * (1 + order_level.spread_factor * spread_multiplier * bollinger_side_multiplier)
 
-        # Get triple barrier configs from the order level. Updated here to get the correct target prices.
-        self.take_profit_pct = self.price_pct_between_levels * order_level.triple_barrier_conf.take_profit
-        self.stop_loss_pct = self.price_pct_between_levels * order_level.triple_barrier_conf.stop_loss
-        self.trailing_stop_activation_pct = self.price_pct_between_levels * order_level.triple_barrier_conf.trailing_stop_activation_price_delta
-        self.trailing_stop_trailing_pct = self.price_pct_between_levels * order_level.triple_barrier_conf.trailing_stop_trailing_delta
-
-        # Calculate order price and limits
-        order_price = bollinger_mid_price * (1 + order_level.spread_factor * spread_multiplier * side_multiplier)
-        tolerance = self.config.activation_threshold * spread_multiplier
+        # Calculate gap tolerance for the order (because we're using market orders)
+        tolerance = self.config.activation_threshold * self.price_pct_between_levels
         order_upper_limit = order_price * (1 + tolerance)
         order_lower_limit = order_price * (1 - tolerance)
 
         # This side will replace the original order level side if the order is placed from the opposite side
-        if close_price < order_price:
-            fixed_side = TradeType.BUY
-            fixed_side_multiplier = 1
-        elif close_price > order_price:
-            fixed_side = TradeType.SELL
-            fixed_side_multiplier = -1
-        else:
-            fixed_side = order_level.side
-            fixed_side_multiplier = side_multiplier
+        fixed_side = TradeType.BUY if close_price < order_price else TradeType.SELL
+        fixed_side_multiplier = 1 if fixed_side == TradeType.BUY else -1
+
+        # Get triple barrier pcts
+        stop_loss_pct, take_profit_pct, trailing_stop_activation_pct, trailing_stop_trailing_pct = self.get_triple_barrier_pct(
+            liquidation_pct, order_level)
 
         # Calculate target prices according to the fixed side
-        take_profit_price = order_price * (1 + self.take_profit_pct * fixed_side_multiplier)
-        stop_loss_price = order_price * (1 - self.stop_loss_pct * fixed_side_multiplier)
-        trailing_stop_activation_price = order_price * (1 + self.trailing_stop_activation_pct * fixed_side_multiplier)
-        trailing_stop_trailing_price = order_price * (1 - self.trailing_stop_trailing_pct * fixed_side_multiplier)
+        take_profit_price = order_price * (1 + take_profit_pct * fixed_side_multiplier)
+        stop_loss_price = order_price * (1 - stop_loss_pct * fixed_side_multiplier)
+        trailing_stop_activation_price = order_price * (1 + trailing_stop_activation_pct * fixed_side_multiplier)
+        trailing_stop_trailing_price = order_price * (1 + (trailing_stop_activation_pct - trailing_stop_trailing_pct) * fixed_side_multiplier)
 
         # Update target prices for format status
-        self.target_prices[f"{order_level.level}"] = {
+        self.target_prices[f"{order_level.level}_{side_name}_{fixed_side.name}"] = {
             "side": fixed_side.name,
-            "status": "Pending",
             "close_price": close_price,
             "order_price": order_price,
             "lower_limit": order_lower_limit,
             "upper_limit": order_upper_limit,
             "take_profit_price": take_profit_price,
             "stop_loss_price": stop_loss_price,
-            "stop_loss_pct": f"{100 * self.stop_loss_pct:.3f}%",
+            "stop_loss_pct": f"{100 * stop_loss_pct:.3f}%",
             "trailing_stop_activation_price": trailing_stop_activation_price,
-            "trailing_stop_activation_pct": f"{100 * self.trailing_stop_activation_pct:.3f}%",
+            "trailing_stop_activation_pct": f"{100 * trailing_stop_activation_pct:.3f}%",
             "trailing_stop_trailing_price": trailing_stop_trailing_price,
-            "trailing_stop_trailing_pct": f"{100 * self.trailing_stop_trailing_pct:.3f}%",
+            "trailing_stop_trailing_pct": f"{100 * trailing_stop_trailing_pct:.3f}%",
           }
+
+        # Stop trading if the intra level price pct is too low
+        if spread_multiplier * Decimal(str(self.config.intra_spread_pct)) < self.config.min_price_pct_between_levels:
+            self.target_prices[f"{order_level.level}_{side_name}_{fixed_side.name}"]["status"] = "Spread too low"
+            return
+
+        self.target_prices[f"{order_level.level}_{side_name}_{fixed_side.name}"]["status"] = "Waiting"
 
         # Smart activation of orders
         smart_activation_condition = self.config.smart_activation and (
@@ -169,13 +162,13 @@ class PriceFollowerV1(MarketMakingControllerBase):
             return
 
         # Mark as active
-        self.target_prices[f"{order_level.level}"]["status"] = "Active"
+        self.target_prices[f"{order_level.level}_{side_name}_{fixed_side.name}"]["status"] = "Active"
 
         # Set up trailing stop
         if order_level.triple_barrier_conf.trailing_stop_trailing_delta and order_level.triple_barrier_conf.trailing_stop_trailing_delta:
             trailing_stop = TrailingStop(
-                activation_price_delta=self.trailing_stop_activation_pct,
-                trailing_delta=self.trailing_stop_trailing_pct,
+                activation_price_delta=trailing_stop_activation_pct,
+                trailing_delta=trailing_stop_trailing_pct,
             )
         else:
             trailing_stop = None
@@ -187,8 +180,8 @@ class PriceFollowerV1(MarketMakingControllerBase):
             exchange=self.config.exchange,
             side=fixed_side,
             amount=amount,
-            take_profit=self.take_profit_pct,
-            stop_loss=self.stop_loss_pct,
+            take_profit=take_profit_pct,
+            stop_loss=stop_loss_pct,
             time_limit=order_level.triple_barrier_conf.time_limit,
             entry_price=Decimal(order_price),
             open_order_type=order_level.triple_barrier_conf.open_order_type,
@@ -197,3 +190,43 @@ class PriceFollowerV1(MarketMakingControllerBase):
             leverage=self.config.leverage
         )
         return position_config
+
+    def get_triple_barrier_pct(self,
+                               liquidation_pct: float,
+                               order_level: OrderLevel):
+        """
+        Calculates the triple barrier percentages according to the order level and the liquidation percentage.
+
+        Notes:
+            - The percentage can't be higher than 100% of the position value due to high volatility.
+            - It's a good idea to preserve triple barrier proportions to tune TPs or TSLs properly.
+
+        :param liquidation_pct: Liquidation percentage of the position
+        :param order_level: Order level object
+        :return: stop_loss_pct, take_profit_pct, trailing_stop_activation_pct, trailing_stop_trailing_pct
+        """
+        liquidation_pct = Decimal(str(liquidation_pct))
+        # Calculate dynamic percentages
+        dynamic_take_profit_pct = self.price_pct_between_levels * order_level.triple_barrier_conf.take_profit
+        dynamic_trailing_stop_activation_pct = (self.price_pct_between_levels *
+                                                order_level.triple_barrier_conf.trailing_stop_activation_price_delta)
+        dynamic_trailing_stop_trailing_pct = (self.price_pct_between_levels *
+                                              order_level.triple_barrier_conf.trailing_stop_trailing_delta)
+
+        # Calculate max percentages
+        max_take_profit_pct = (order_level.triple_barrier_conf.take_profit /
+                               order_level.triple_barrier_conf.stop_loss) * liquidation_pct
+        max_trailing_stop_activation_pct = (order_level.triple_barrier_conf.trailing_stop_activation_price_delta /
+                                            order_level.triple_barrier_conf.stop_loss) * liquidation_pct
+        max_trailing_stop_trailing_pct = (order_level.triple_barrier_conf.trailing_stop_trailing_delta /
+                                          order_level.triple_barrier_conf.stop_loss) * liquidation_pct
+
+        # Calculate final percentages, ensuring they don't exceed the liquidation percentage
+        stop_loss_pct = min(self.price_pct_between_levels * order_level.triple_barrier_conf.stop_loss, liquidation_pct)
+        take_profit_pct = min(dynamic_take_profit_pct, max_take_profit_pct)
+        trailing_stop_activation_pct = min(dynamic_trailing_stop_activation_pct, max_trailing_stop_activation_pct)
+        trailing_stop_trailing_pct = min(dynamic_trailing_stop_trailing_pct, max_trailing_stop_trailing_pct)
+
+        return stop_loss_pct, take_profit_pct, trailing_stop_activation_pct, trailing_stop_trailing_pct
+
+

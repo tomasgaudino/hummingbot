@@ -14,17 +14,52 @@ from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 from hummingbot.smart_components.strategy_frameworks.data_types import TripleBarrierConf
 from hummingbot.client.ui.interface_utils import format_df_for_printout
 
+DEBUG_MODE = False
+
 
 class PriceFollowerV1MultiplePairs(ScriptStrategyBase):
+    """
+    This strategy places market orders on both bollinger bands sides.
+
+    Every order above the close price is considered a long order. Every order below the close price is considered a
+    short order.
+
+    For the previous reason, the strategy will only work with market orders. If you try to use limit orders, the
+    strategy will not work as expected.
+
+    Market orders need a certain tolerance to be activated. This tolerance is defined by the activation_threshold
+    parameter.
+
+    As this strategy uses linear distribution for orders, the orders will be placed with a fixed distance between them.
+    This value is called intra_spread_pct.
+
+    To get the equivalent price distance from previous value, the controller multiplies it by the spread_multiplier
+    (in this case, bollinger width). This is called price_pct_between_levels, and it's the core metric of the strategy.
+
+    The following variables are factors that will be multiplied by the price_pct_between_levels to
+    calculate the price target for market orders:
+
+        - activation_threshold: minimum distance between close price and order price to activate the order
+        - min_price_pct_between_levels: if the price distance between levels is lower than this
+        value, the order will not be placed. Acts as a low volatility filter
+        - take_profit: number of levels
+        - stop_loss: number of levels
+        - trailing_stop_activation_price_delta: number of levels
+        - trailing_stop_trailing_delta: number of levels
+
+    If you're trading with high leverage values in volatile markets, the controller will preserve your
+    triple barrier proportions.
+    """
+
     # Define trading pairs where you will be trading
-    trading_pairs = ["TRB-USDT", "BNX-USDT", "BNT-USDT"]
+    trading_pairs = ["TRB-USDT", "GALA-USDT", "FRONT-USDT"]
     # trading_pairs = ["TRB-USDT"]
 
     # Select your favourite exchange
     exchange = "binance_perpetual"
 
     # Select base amount per level. You can pass a list with different amounts to play with expected break even prices
-    single_amount = Decimal("10")
+    single_amount = Decimal("15")
 
     # Select interval
     interval = "1h"
@@ -66,36 +101,35 @@ class PriceFollowerV1MultiplePairs(ScriptStrategyBase):
         "LOOM-USDT": 20,
         "IOTA-USDT": 25,
         "BNT-USDT": 20,
+        "BLUR-USDT": 50,
+        "FRONT-USDT": 50,
+        "GALA-USDT": 50
     }
 
-    # Set up spreads grid
-    n_levels = 15
+    # TODO: Allow to set different order levels for each trading pair
+    # Set up orders grid config
+    n_levels = 8
     start_value = 0.1
-    end_value = 2.0
+    end_value = 1.5
     spreads = Distributions.linear(n_levels=n_levels, start=Decimal(str(start_value)), end=Decimal(str(end_value)))
 
-    # Set up the side filter. This is used to operate only on one side of the bollinger bands
-    side_filter = True
-
-    # Set up activation threshold for smart activation. As this strategy uses market orders we need this
-    smart_activation = True
-    activation_threshold = Decimal("0.005")
-
-    # Set up cooldown time. This is the time that the executor will wait before creating a new order after finishing one
-    cooldown_time = 60 * 2
-
-    # Enable dynamic target spread. This will make the target spread to be a % of the current spread
-    dynamic_target_spread = True
-
-    # This value should be multiplied by the spread_multiplier to get the price % distance between levels
+    # Calculate orders grid properties
     intra_spread_pct = end_value / n_levels
 
-    # Set up triple barrier confs. Should be coefficients that will be multiplied by the spread multiplier to get the target prices
-    take_profit = Decimal("3.0")
+    # Set up smart activation config. We need this for market orders to be activated
+    activation_threshold = Decimal("0.1")
+    min_price_pct_between_levels = Decimal("0.02")
+    smart_activation = True
+
+    # Set up cooldown time. This is the time that the executor will wait before creating a new order after finishing one
+    cooldown_time = 2 * 60
+
+    # Set up triple barrier confs. Should be coefficients that will be multiplied by the price distance between levels
+    take_profit = Decimal("2.0")
     stop_loss = Decimal("3.0")
-    trailing_stop_activation_price_delta_factor = Decimal("2.0")
-    trailing_stop_trailing_delta_factor = Decimal("0.5")
-    time_limit = 60 * 60 * 24 * 3
+    trailing_stop_activation_price_delta_factor = Decimal("1.0")
+    trailing_stop_trailing_delta_factor = Decimal("0.3")
+    time_limit = 60 * 60 * 24 * 1
 
     # Build triple barrier confs for every spread
     triple_barrier_confs = []
@@ -127,18 +161,17 @@ class PriceFollowerV1MultiplePairs(ScriptStrategyBase):
             exchange=exchange,
             trading_pair=trading_pair,
             order_levels=order_levels,
+            debug_mode=DEBUG_MODE,
             candles_config=[
                 CandlesConfig(connector=exchange, trading_pair=trading_pair, interval=interval, max_records=300),
             ],
             bb_length=bb_length,
             bb_std=bb_std,
-            side_filter=side_filter,
             smart_activation=smart_activation,
-            dynamic_target_spread=dynamic_target_spread,
             activation_threshold=activation_threshold,
             leverage=leverage_by_trading_pair.get(trading_pair, 1),
-            # Add this to get the target prices
             intra_spread_pct=intra_spread_pct,
+            min_price_pct_between_levels=min_price_pct_between_levels,
         )
         controller = PriceFollowerV1(config=config)
         markets = controller.update_strategy_markets_dict(markets)
@@ -217,11 +250,31 @@ class PriceFollowerV1MultiplePairs(ScriptStrategyBase):
         lines = []
         for trading_pair, executor_handler in self.executor_handlers.items():
             lines.extend([""])
-            if executor_handler.controller.stop_loss_pct and executor_handler.controller.trailing_stop_activation_pct and executor_handler.controller.trailing_stop_trailing_pct:
+            if executor_handler.controller.target_prices:
                 lines.extend(
-                    [f"Strategy: {executor_handler.controller.config.strategy_name} | Trading Pair: {trading_pair} | Estimated Intra Spread Pct: {executor_handler.controller.price_pct_between_levels:.3%} | Est. Stop Loss: {executor_handler.controller.stop_loss_pct:.2%} | Est. Trailing Stop Activation: {executor_handler.controller.trailing_stop_activation_pct:.2%} | Est. Trailing Stop Delta: {executor_handler.controller.trailing_stop_trailing_pct:.2%}"])
+                    [f"Strategy: {executor_handler.controller.config.strategy_name} | Trading Pair: {trading_pair} | Price Pct Between Levels: {executor_handler.controller.price_pct_between_levels:.3%}",
+                     ""])
+
+                closed_executors_info = executor_handler.closed_executors_info()
+                active_executors_info = executor_handler.active_executors_info()
+                unrealized_pnl = float(active_executors_info["net_pnl"])
+                realized_pnl = closed_executors_info["net_pnl"]
+                total_pnl = unrealized_pnl + realized_pnl
+                total_volume = closed_executors_info["total_volume"] + float(active_executors_info["total_volume"])
+                total_long = closed_executors_info["total_long"] + float(active_executors_info["total_long"])
+                total_short = closed_executors_info["total_short"] + float(active_executors_info["total_short"])
+                accuracy_long = closed_executors_info["accuracy_long"]
+                accuracy_short = closed_executors_info["accuracy_short"]
+                total_accuracy = (accuracy_long * total_long + accuracy_short * total_short) \
+                                 / (total_long + total_short) if (total_long + total_short) > 0 else 0
+                lines.extend([f"Unrealized PNL: {unrealized_pnl * 100:.2f} % | Realized PNL: {realized_pnl * 100:.2f} % | Total PNL: {total_pnl * 100:.2f} % | Total Volume: {total_volume} | Total positions: {total_short + total_long} --> Accuracy: {total_accuracy:.2%} ",
+                              "",
+                              f"Long: {total_long} --> Accuracy: {accuracy_long:.2%} | Short: {total_short} --> Accuracy: {accuracy_short:.2%}"])
                 df = pd.DataFrame(executor_handler.controller.target_prices).T
-                levels_str = format_df_for_printout(df, table_format="psql")
+                df["level"] = df.index
+                df.insert(0, "level", df.pop("level"))
+                df.drop(columns=["side"], inplace=True)
+                levels_str = format_df_for_printout(df.sort_values(by=["order_price"], ascending=False), table_format="psql")
                 lines.extend([f"{levels_str}"])
                 lines.extend([""])
         return "\n".join(lines)
