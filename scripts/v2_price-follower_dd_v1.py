@@ -106,6 +106,10 @@ class PriceFollowerV1MultiplePairs(ScriptStrategyBase):
     trailing_stop_trailing_delta_factor = Decimal("0.5")
     time_limit = 60 * 60 * 24 * 1
     liquidation_thold = False
+    open_order_type = OrderType.MARKET
+    take_profit_order_type = OrderType.MARKET
+    stop_loss_order_type = OrderType.MARKET
+    time_limit_order_type = OrderType.MARKET
 
     # Build triple barrier confs for every spread
     triple_barrier_confs = []
@@ -115,7 +119,11 @@ class PriceFollowerV1MultiplePairs(ScriptStrategyBase):
                               take_profit=take_profit,
                               time_limit=time_limit,
                               trailing_stop_activation_price_delta=trailing_stop_activation_price_delta_factor,
-                              trailing_stop_trailing_delta=trailing_stop_trailing_delta_factor)
+                              trailing_stop_trailing_delta=trailing_stop_trailing_delta_factor,
+                              open_order_type=open_order_type,
+                              take_profit_order_type=open_order_type,
+                              stop_loss_order_type=open_order_type,
+                              time_limit_order_type=open_order_type)
         )
 
     # Build order levels
