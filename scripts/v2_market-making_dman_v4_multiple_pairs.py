@@ -18,7 +18,7 @@ from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 class DManV4MultiplePairs(ScriptStrategyBase):
     # Account configuration
     exchange = "binance_perpetual"
-    trading_pairs = ["ETH-USDT"]
+    trading_pairs = ["GALA-USDT", "NEO-USDT"]
     leverage = 20
 
     # Candles configuration
@@ -29,11 +29,11 @@ class DManV4MultiplePairs(ScriptStrategyBase):
     bollinger_band_std = 3.0
 
     # Orders configuration
-    order_amount = Decimal("25")
-    n_levels = 5
-    start_spread = 0.0006
+    order_amount = Decimal("10")
+    n_levels = 10
+    start_spread = 0.0005
     step_between_orders = 0.01
-    order_refresh_time = 60 * 15  # 15 minutes
+    order_refresh_time = 60 * 60 * 3  # 3 hours
     cooldown_time = 5
 
     # Triple barrier configuration
@@ -41,11 +41,11 @@ class DManV4MultiplePairs(ScriptStrategyBase):
     take_profit = Decimal("0.06")
     time_limit = 60 * 60 * 12
     trailing_stop_activation_price_delta = Decimal(str(step_between_orders))
-    trailing_stop_trailing_delta = Decimal(str(step_between_orders / 2))
+    trailing_stop_trailing_delta = Decimal(str(step_between_orders / 3))
 
     # Global Trailing Stop configuration
     global_trailing_stop_activation_price_delta = Decimal(str(step_between_orders))
-    global_trailing_stop_trailing_delta = Decimal(str(step_between_orders / 2))
+    global_trailing_stop_trailing_delta = Decimal(str(step_between_orders / 4))
 
     # Advanced configurations
     dynamic_spread_factor = False

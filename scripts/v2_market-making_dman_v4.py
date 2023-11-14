@@ -43,7 +43,7 @@ class DManV4MultiplePairs(ScriptStrategyBase):
     trailing_stop_activation_price_delta = Decimal(str(step_between_orders))
     trailing_stop_trailing_delta = Decimal(str(step_between_orders / 3))
 
-    # Global Trailing Stop configuration
+    # Global Trailing Stop  configuration
     global_trailing_stop_activation_price_delta = Decimal(str(step_between_orders))
     global_trailing_stop_trailing_delta = Decimal(str(step_between_orders / 4))
 
@@ -53,6 +53,7 @@ class DManV4MultiplePairs(ScriptStrategyBase):
     dynamic_target_spread = False
     smart_activation = False
     activation_threshold = Decimal("0.001")
+    price_band = False
     price_band_long_filter = Decimal("0.8")
     price_band_short_filter = Decimal("0.8")
 
@@ -83,9 +84,11 @@ class DManV4MultiplePairs(ScriptStrategyBase):
             ],
             bb_length=bollinger_band_length,
             bb_std=bollinger_band_std,
+            price_band=price_band,
             price_band_long_filter=price_band_long_filter,
             price_band_short_filter=price_band_short_filter,
             side_filter=side_filter,
+            step_between_orders=step_between_orders,
             dynamic_spread_factor=dynamic_spread_factor,
             dynamic_target_spread=dynamic_target_spread,
             smart_activation=smart_activation,
