@@ -1,19 +1,21 @@
 from decimal import Decimal
-import pandas as pd
 from typing import Dict
 
+import pandas as pd
+
+from hummingbot.client.ui.interface_utils import format_df_for_printout
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.data_type.common import OrderType, PositionAction, PositionSide, TradeType
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesConfig
-from hummingbot.smart_components.executors.position_executor.data_types import TrailingStop
 from hummingbot.smart_components.controllers.price_follower_v2 import PriceFollowerV2, PriceFollowerV2Config
-from hummingbot.smart_components.strategy_frameworks.data_types import ExecutorHandlerStatus
+from hummingbot.smart_components.executors.position_executor.data_types import TrailingStop
+from hummingbot.smart_components.strategy_frameworks.data_types import ExecutorHandlerStatus, TripleBarrierConf
+from hummingbot.smart_components.strategy_frameworks.market_making.market_making_executor_handler import (
+    MarketMakingExecutorHandler,
+)
 from hummingbot.smart_components.utils.distributions import Distributions
-from hummingbot.smart_components.strategy_frameworks.market_making.market_making_executor_handler import MarketMakingExecutorHandler
 from hummingbot.smart_components.utils.order_level_builder import OrderLevelBuilder
 from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
-from hummingbot.smart_components.strategy_frameworks.data_types import TripleBarrierConf
-from hummingbot.client.ui.interface_utils import format_df_for_printout
 
 
 class PriceFollowerV2MultiplePairs(ScriptStrategyBase):
@@ -205,5 +207,5 @@ class PriceFollowerV2MultiplePairs(ScriptStrategyBase):
                 df.drop(columns=["side"], inplace=True)
                 levels_str = format_df_for_printout(df.sort_values(by=["order_price"], ascending=False), table_format="psql")
                 lines.extend([f"{levels_str}"])
-                lines.extend([""])
+                lines.extend([f"{executor_handler.to_format_status()}"])
         return "\n".join(lines)
