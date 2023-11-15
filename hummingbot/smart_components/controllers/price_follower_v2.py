@@ -129,13 +129,6 @@ class PriceFollowerV2(MarketMakingControllerBase):
             "order_price": order_price,
             "lower_limit": order_lower_limit,
             "upper_limit": order_upper_limit,
-            "take_profit_price": None,
-            "stop_loss_price": None,
-            "stop_loss_pct": None,
-            "trailing_stop_activation_price": None,
-            "trailing_stop_activation_pct": None,
-            "trailing_stop_trailing_price": None,
-            "trailing_stop_trailing_pct": None,
           }
 
         # Avoid placing orders according to certain bounds of the bollinger band
@@ -161,16 +154,8 @@ class PriceFollowerV2(MarketMakingControllerBase):
             return
 
         # Update triple barrier conf after opening or reinforcing position
-        self.target_prices[f"{order_level.level}_{side_name}_{fixed_side.name}"] = {
-            "status": "Active",
-            "take_profit_price": take_profit_price,
-            "stop_loss_price": stop_loss_price,
-            "stop_loss_pct": f"{100 * stop_loss_pct:.3f}%",
-            "trailing_stop_activation_price": trailing_stop_activation_price,
-            "trailing_stop_activation_pct": f"{100 * trailing_stop_activation_pct:.3f}%",
-            "trailing_stop_trailing_price": trailing_stop_trailing_price,
-            "trailing_stop_trailing_pct": f"{100 * trailing_stop_trailing_pct:.3f}%",
-        }
+        # TODO: check why fixed_side creates a problem here
+        self.target_prices[f"{order_level.level}_{side_name}_{fixed_side.name}"] = {"status": "Active"}
 
         if order_level.triple_barrier_conf.trailing_stop_trailing_delta and order_level.triple_barrier_conf.trailing_stop_trailing_delta:
             trailing_stop = TrailingStop(
@@ -179,11 +164,12 @@ class PriceFollowerV2(MarketMakingControllerBase):
             )
         else:
             trailing_stop = None
+
         position_config = PositionConfig(
             timestamp=time.time(),
             trading_pair=self.config.trading_pair,
             exchange=self.config.exchange,
-            side=order_level.side,
+            side=fixed_side,
             amount=amount,
             take_profit=take_profit_pct,
             stop_loss=stop_loss_pct,
