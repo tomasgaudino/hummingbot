@@ -131,6 +131,8 @@ REST_BILLS_DETAILS = {METHOD: GET,
                       ENDPOINT: f"/api/{REST_API_VERSION}/account/bills"}
 REST_WS_LOGIN_PATH = {METHOD: GET,
                       ENDPOINT: "/users/self/verify"}
+REST_GET_ACCOUNT_CONFIG = {METHOD: GET,
+                           ENDPOINT: f"/api/{REST_API_VERSION}/account/config"}
 
 
 # -------------------------------------------
