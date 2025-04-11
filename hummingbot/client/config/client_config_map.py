@@ -1067,6 +1067,15 @@ class ClientConfigMap(BaseClientModel):
     )
     market_data_collection: MarketDataCollectionConfigMap = Field(default=MarketDataCollectionConfigMap())
 
+    mongo_uri: Optional[str] = Field(
+        default="",
+        description=('MongoDB Connection String')
+    )
+    mongo_database: Optional[str] = Field(
+        default="quants_lab",
+        description=('MongoDB Database Reference')
+    )
+
     class Config:
         title = "client_config_map"
 

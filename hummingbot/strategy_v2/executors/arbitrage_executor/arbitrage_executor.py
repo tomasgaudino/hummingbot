@@ -1,8 +1,10 @@
 import asyncio
 import logging
+import time
 from decimal import Decimal
 from typing import Dict, Union
 
+from controllers.generic.arbitrage_recorder_controller import MongoClient
 from hummingbot.connector.utils import split_hb_trading_pair
 from hummingbot.core.data_type.common import OrderType, TradeType
 from hummingbot.core.event.events import BuyOrderCreatedEvent, MarketOrderFailureEvent, SellOrderCreatedEvent
@@ -17,6 +19,9 @@ from hummingbot.strategy_v2.models.executors import CloseType, TrackedOrder
 
 class ArbitrageExecutor(ExecutorBase):
     _logger = None
+    arbitrage_event = {}
+    db_connected: bool = False
+    mongo_instance: MongoClient = None
 
     @classmethod
     def logger(cls) -> HummingbotLogger:
@@ -153,21 +158,58 @@ class ArbitrageExecutor(ExecutorBase):
         return await self.connectors[exchange].get_quote_price(trading_pair, is_buy, order_amount)
 
     async def control_task(self):
+        if not self.db_connected:
+            self.mongo_instance = MongoClient.get_instance()
+            try:
+                await self.mongo_instance.connect()
+                self.db_connected = True
+            except Exception as e:
+                self.logger().error(f"Could not connect to MongoDB: {e}")
         if self.status == RunnableStatus.RUNNING:
             try:
                 await self.update_trade_pnl_pct()
                 await self.update_tx_cost()
                 self._current_profitability = (self._trade_pnl_pct * self.order_amount - self._last_tx_cost) / self.order_amount
                 if self._current_profitability > self.min_profitability:
-                    await self.execute_arbitrage()
+                    self.track_arbitrage_event()
+                else:
+                    if self._is_arbitrage_event_initialized():
+                        await self.mongo_instance.insert_documents(collection_name="arbitrage_events",
+                                                                   documents=[self.arbitrage_event],
+                                                                   db_name="quants_lab")
+                    self.arbitrage_event = {}
             except Exception as e:
                 self.logger().error(f"Error calculating profitability: {e}")
-        elif self.status == RunnableStatus.SHUTTING_DOWN:
-            if self._cumulative_failures > self.max_retries:
-                self.close_type = CloseType.FAILED
-                self.stop()
-            else:
-                self.check_order_status()
+
+    def _is_arbitrage_event_initialized(self):
+        start_timestamp = self.arbitrage_event.get("start_timestamp")
+        return start_timestamp is not None
+
+    def track_arbitrage_event(self):
+        if not self._is_arbitrage_event_initialized():
+            buying_market_price, selling_market_price = self.get_buy_and_sell_prices()
+            self.arbitrage_event = {
+                "start_timestamp": time.time(),
+                "end_timestamp": None,
+                "min_pnl_pct": self.min_profitability,
+                "max_pnl_pct": self._current_profitability,
+                "buying_market_name": self.buying_market.connector_name,
+                "selling_market_name": self.selling_market.connector_name,
+                "buying_market_price": buying_market_price,
+                "selling_market_price": selling_market_price,
+                "buying_market_trading_pair": self.buying_market.trading_pair,
+                "selling_market_trading_pair": self.selling_market.trading_pair,
+            }
+        else:
+            max_pnl_pct = self.arbitrage_event["max_pnl_pct"]
+            arbitrage_update = {
+                "end_timestamp": time.time(),
+                "max_pnl_pct": max(max_pnl_pct, self._current_profitability),
+            }
+            self.arbitrage_event.update(arbitrage_update)
+
+    async def on_start(self):
+        return
 
     def early_stop(self, keep_position: bool = False):
         self.close_type = CloseType.EARLY_STOP
