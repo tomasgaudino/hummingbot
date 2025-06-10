@@ -137,6 +137,14 @@ class PMMConfig(ControllerConfigBase):
     global_take_profit: Decimal = Decimal("0.02")
     global_stop_loss: Decimal = Decimal("0.05")
 
+    tick_mode: bool = Field(
+        default=False,
+        json_schema_extra={
+            "prompt_on_new": True,
+            "prompt": "Enter true/false to interpret spreads as tick distance (e.g., false)"
+        }
+    )
+
     @field_validator("take_profit", mode="before")
     @classmethod
     def validate_target(cls, v):
@@ -248,6 +256,8 @@ class PMM(ControllerBase):
         self.config = config
         self.market_data_provider.initialize_rate_sources([ConnectorPair(
             connector_name=config.connector_name, trading_pair=config.trading_pair)])
+        self.trading_rules = self.market_data_provider.get_trading_rules(self.config.connector_name,
+                                                                         self.config.trading_pair)
 
     def determine_executor_actions(self) -> List[ExecutorAction]:
         """
@@ -325,7 +335,11 @@ class PMM(ControllerBase):
                 skew = sell_skew
             # Calculate price
             side_multiplier = Decimal("-1") if trade_type == TradeType.BUY else Decimal("1")
-            price = reference_price * (Decimal("1") + side_multiplier * spread_in_pct)
+            if self.config.tick_mode:
+                tick_size = self.trading_rules.min_price_increment
+                price = reference_price + (tick_size * side_multiplier * spread_in_pct)
+            else:
+                price = reference_price * (Decimal("1") + side_multiplier * spread_in_pct)
             # Calculate amount with skew applied
             amount = self.market_data_provider.quantize_order_amount(self.config.connector_name,
                                                                      self.config.trading_pair,
