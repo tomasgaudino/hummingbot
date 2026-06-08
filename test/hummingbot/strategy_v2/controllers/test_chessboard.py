@@ -514,14 +514,34 @@ class TestChessboard(IsolatedAsyncioWrapperTestCase):
 
     # ── Capital por balance libre + zona sin munición ────────────────────────
     def test_capital_for_caps_at_free_balance(self):
-        """_capital_for = min(nominal total/N/2, balance libre del lado)."""
+        """_capital_for capa al balance libre del lado (evita INSUFFICIENT_BALANCE)."""
         ctrl, mdp = self._make_controller(n_grids=10, a="340000", b="400000")
         self._set_price(mdp, "373000")
-        # nominal = 50000/10/2 = 2500
-        self._set_balance(mdp, quote="800")   # BRL libre 800 -> LONG capa a 800
+        # LONG con BRL libre chico -> capa a ese libre (el nominal del recorrido es mayor)
+        self._set_balance(mdp, quote="800")
         self.assertEqual(ctrl._capital_for(TradeType.BUY), Decimal("800"))
-        self._set_balance(mdp, quote="9000")  # BRL holgado -> LONG = nominal 2500
-        self.assertEqual(ctrl._capital_for(TradeType.BUY), Decimal("2500"))
+
+    def test_capital_for_dimensiona_al_recorrido(self):
+        """El capital se dimensiona al recorrido techo<->piso, asimétrico LONG/SHORT
+        (no total/N/2). SHORT reparte la descarga; LONG reparte la carga."""
+        ctrl, mdp = self._make_controller(n_grids=10, a="340000", b="400000")
+        ctrl.config.target_pct_btc = Decimal("0.50")   # piso 50%
+        ctrl.config.techo_pct_btc = Decimal("1.0")     # techo 100%
+        self._set_price(mdp, "373000")
+        self._set_balance(mdp)  # balance amplio: no capa, vemos el nominal del recorrido
+        rec = ctrl._recorrido_quote()
+        self.assertIsNotNone(rec)
+        brl_descarga, brl_carga = rec
+        # base 0.5 BTC @ 373000 = 186500 ; quote 25000 ; nav 211500 ; %BTC ~88%
+        # piso 50% y techo 100% -> hay descarga Y carga, ambas > 0
+        self.assertGreater(brl_descarga, 0)
+        self.assertGreater(brl_carga, 0)
+        cap_short = ctrl._capital_for(TradeType.SELL)
+        cap_long = ctrl._capital_for(TradeType.BUY)
+        # asimétrico: SHORT y LONG difieren (distinto nº de grillas por lado y distinto BRL)
+        self.assertNotEqual(cap_short, cap_long)
+        self.assertGreater(cap_short, 0)
+        self.assertGreater(cap_long, 0)
 
     def test_long_no_capital_marks_zone(self):
         """LONG con BRL libre < min_order_amount no se crea, marca zona y abre evento."""
@@ -607,7 +627,9 @@ class TestChessboard(IsolatedAsyncioWrapperTestCase):
           paso 3: net=-60 -> 50%   (<=60% -> corte activo)
         """
         ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
-        ctrl.config.target_pct_btc = Decimal("0.60")
+        ctrl.config.target_pct_btc = Decimal("0.60")   # piso
+        ctrl.config.techo_pct_btc = Decimal("1.0")     # techo
+        ctrl.config.hysteresis_pct = Decimal("0")      # aislar: sin histéresis
         ctrl.config.base_assigned = Decimal("80")
         ctrl.config.quote_assigned = Decimal("20000")
         self._set_price(mdp, "1000")  # precio fijo para aislar el efecto del inventario
@@ -619,47 +641,39 @@ class TestChessboard(IsolatedAsyncioWrapperTestCase):
             ex.custom_info = {"held_position_orders": self._held_orders(("SELL", "20"))}
             return ex
 
-        print("\n=== recorrido: precio sube, SHORTs descargan, %BTC -> target 60% ===")
+        print("\n=== recorrido: precio sube, SHORTs descargan, %BTC baja ===")
         pcts = []
-        cuts = []
         for paso, idx in enumerate([3, 4, 5], start=1):
             ctrl.executors_info = [close_short(idx, f"EXS{idx}")]
             await ctrl.update_processed_data()
-            actions = ctrl.determine_executor_actions()
-            created = self._created(actions)
+            ctrl.determine_executor_actions()
             pct = ctrl.processed_data["pct_btc"]
             net = ctrl.processed_data["net_btc_from_grids"]
-            target_hit = ctrl._target_reached()
-            # ¿el relevo intentó crear una SHORT nueva? (cb_{idx+1}_S, +1 arriba)
-            short_relayed = any(c.endswith("_S") for c in created)
             pcts.append(pct)
-            cuts.append(target_hit)
-            print(f"  paso {paso}: SHORT cb_{idx}_S hold -> net={net:+} %BTC={pct:.1%} "
-                  f"target_alcanzado={target_hit} releva_SHORT={short_relayed} creado={created or '{}'}")
+            print(f"  paso {paso}: SHORT cb_{idx}_S hold -> net={net:+} %BTC={pct:.1%}")
             # El inventario firme baja (descarga): net cada vez más negativo
             self.assertEqual(net, Decimal("-20") * paso)
-            # Si el target ya se alcanzó, NO debe relevar ninguna SHORT nueva
-            if target_hit:
-                self.assertFalse(short_relayed,
-                                 f"paso {paso}: target alcanzado pero relevó SHORT {created}")
 
         # (1) %BTC monótonamente decreciente
         self.assertTrue(all(pcts[i] > pcts[i + 1] for i in range(len(pcts) - 1)),
                         f"%BTC no es monótonamente decreciente: {[f'{p:.3f}' for p in pcts]}")
-        # (2) arrancó arriba del target y terminó debajo (cruzó el 60%)
-        self.assertGreater(pcts[0], Decimal("0.60"))
-        self.assertLessEqual(pcts[-1], Decimal("0.60"))
-        # (3) en el último paso el corte está activo
-        self.assertTrue(cuts[-1])
+        # (2) el target LOCAL bloquea la SHORT cuando el %BTC firme cruza por debajo.
+        #     A precio 1000 en rango [800,1200], target_local ~ interp(techo,piso,0.5)=0.80.
+        #     Con %BTC ya en 50%, una SHORT en el escalón del precio está bloqueada.
+        idx_precio = ctrl._step_containing(Decimal("1000"))["idx"]
+        self.assertTrue(ctrl._blocked_by_local_target(idx_precio, TradeType.SELL))
 
     async def test_price_walk_down_loads_and_longs_keep_running(self):
         """Recorrido BAJANDO: las LONG cargan BTC (held BUY, +) y el %BTC SUBE.
         La carga NUNCA se corta, aunque el %BTC supere el target."""
         ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
         ctrl.config.target_pct_btc = Decimal("0.60")
-        ctrl.config.base_assigned = Decimal("80")
-        ctrl.config.quote_assigned = Decimal("20000")
-        self._set_price(mdp, "1000")
+        ctrl.config.techo_pct_btc = Decimal("1.0")
+        ctrl.config.hysteresis_pct = Decimal("0")   # aislar el relevo
+        ctrl.config.base_assigned = Decimal("20")    # %BTC bajo -> LONG NO bloqueada por target local
+        ctrl.config.quote_assigned = Decimal("80000")
+        # precio en el centro de cb_4 (no en borde) para que el relevo a cb_4_L caiga en banda
+        self._set_price(mdp, "984")  # cb_4 = [960, 1000), centro 980
 
         ex = self._mock_executor("cb_5_L", is_active=False,
                                  status=RunnableStatus.TERMINATED,

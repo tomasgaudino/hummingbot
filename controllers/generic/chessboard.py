@@ -56,10 +56,21 @@ class ChessboardConfig(ControllerConfigBase):
     base_assigned: Decimal = Field(json_schema_extra={"is_updatable": True})
     quote_assigned: Decimal = Field(json_schema_extra={"is_updatable": True})
 
-    # Target de campaña: %BTC de la SUB-CUENTA al que se quiere llegar. El controller
-    # CORTA la descarga (no crea más SHORT) cuando el %BTC de su sub-cuenta <= target.
-    # La carga (LONG) sigue habilitada. None = sin corte (cubre todo el rango).
+    # Los DOS extremos del recorrido de inventario (definen el dimensionamiento de
+    # cada grilla, igual que la routine chessboard_lab):
+    #   target_pct_btc = PISO  (en border_b, precio alto): las SHORT descargan hasta acá.
+    #   techo_pct_btc  = TECHO (en border_a, precio bajo): las LONG cargan hasta acá.
+    # El controller CORTA la descarga (no crea más SHORT) cuando el %BTC <= target.
+    # None en target = sin corte. El capital por grilla se dimensiona al recorrido
+    # techo->piso (NO total/N/2): cada SHORT descarga su porción de (actual-piso),
+    # cada LONG carga su porción de (techo-actual). Ver _capital_for.
     target_pct_btc: Optional[Decimal] = Field(default=None, json_schema_extra={"is_updatable": True})
+    techo_pct_btc: Decimal = Field(default=Decimal("1.0"), json_schema_extra={"is_updatable": True})
+
+    # Histéresis: franja (fracción del ancho del escalón) pegada a cada borde donde NO
+    # se puebla la grilla. Evita el churn de relevo cuando el precio oscila en un borde.
+    # 0 = sin histéresis. 0.1 = no crear si el precio está en el 10% más cercano a un borde.
+    hysteresis_pct: Decimal = Field(default=Decimal("0.1"), json_schema_extra={"is_updatable": True})
 
     # Geometría
     n_grids: int = Field(default=10, json_schema_extra={"is_updatable": True})
@@ -203,11 +214,55 @@ class Chessboard(ControllerBase):
         except Exception:
             return Decimal("0")
 
-    def _capital_for(self, side: TradeType) -> Decimal:
-        """Capital a asignar a una grilla de este lado: el nominal (total/N/2) capado
-        al balance LIBRE real del lado. Nunca pide más de lo que hay -> evita
-        INSUFFICIENT_BALANCE. Si el libre es chico, la grilla nace más flaca."""
-        return min(self._capital_per_grid(), self._available_quote_for(side))
+    def _recorrido_quote(self):
+        """BRL a mover de cada lado para recorrer el inventario techo<->piso (igual
+        que _recorrido_inventario de la routine). El NAV es invariante a comprar/
+        vender (intercambiás BTC<->BRL al precio), así que btc_para(%) = %*NAV/precio.
+        Devuelve (brl_descarga, brl_carga). None si no se puede calcular."""
+        try:
+            price = self.market_data_provider.get_price_by_type(
+                self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
+            if not price or price <= 0:
+                return None
+            base = self.config.base_assigned + self._net_btc_from_grids  # BTC firme actual
+            nav = base * price + self.config.quote_assigned
+            if nav <= 0:
+                return None
+            piso = self.config.target_pct_btc if self.config.target_pct_btc is not None else Decimal("0")
+            techo = self.config.techo_pct_btc
+            btc_piso = piso * nav / price
+            btc_techo = techo * nav / price
+            brl_descarga = max(Decimal("0"), (base - btc_piso)) * price   # SHORT venden
+            brl_carga = max(Decimal("0"), (btc_techo - base)) * price     # LONG compran
+            return brl_descarga, brl_carga
+        except Exception:
+            return None
+
+    def _capital_for(self, side: TradeType, idx: int = None) -> Decimal:
+        """Capital de UNA grilla (slot idx, side), DIMENSIONADO AL RECORRIDO
+        techo<->piso (igual que la routine), capado por balance LIBRE real del lado.
+
+        - SHORT: reparte brl_descarga entre las SHORT por ENCIMA del precio actual.
+        - LONG:  reparte brl_carga    entre las LONG  por DEBAJO del precio actual.
+        Fallback a total/N/2 si no hay datos de recorrido. El cap por balance libre
+        evita INSUFFICIENT_BALANCE.
+        """
+        rec = self._recorrido_quote()
+        nominal = None
+        if rec is not None:
+            brl_descarga, brl_carga = rec
+            mid = self.market_data_provider.get_price_by_type(
+                self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
+            # contar grillas de cada lado según su centro de masa vs el precio actual
+            n_short = sum(1 for s in self._steps
+                          if (s["low"] + s["high"]) / 2 >= mid) or 1
+            n_long = sum(1 for s in self._steps
+                         if (s["low"] + s["high"]) / 2 < mid) or 1
+            nominal = (brl_descarga / Decimal(n_short)) if side == TradeType.SELL \
+                else (brl_carga / Decimal(n_long))
+        if nominal is None or nominal <= 0:
+            nominal = self._capital_per_grid()  # fallback histórico
+        return min(nominal, self._available_quote_for(side))
 
     def _make_grid_config(self, step: dict, side: TradeType) -> GridExecutorConfig:
         return GridExecutorConfig(
@@ -219,7 +274,7 @@ class Chessboard(ControllerBase):
             limit_price=self._limit_for(step, side),
             side=side,
             leverage=self.config.leverage,
-            total_amount_quote=self._capital_for(side),
+            total_amount_quote=self._capital_for(side, step["idx"]),
             min_spread_between_orders=self.config.min_spread_between_orders,
             min_order_amount_quote=self.config.min_order_amount_quote,
             max_open_orders=self.config.max_open_orders,
@@ -410,17 +465,54 @@ class Chessboard(ControllerBase):
         except Exception:
             return None  # ante falla, no bloqueamos (deja operar)
 
-    def _target_reached(self) -> bool:
-        """True si la descarga llegó al target (no crear más SHORT)."""
+    def _target_local(self, idx: int) -> Optional[Decimal]:
+        """Target de %BTC LOCAL del escalón idx = la curva determinística en su precio
+        medio (lineal techo en border_a -> piso en border_b). Ej: cb_0 ~techo,
+        cb_N-1 ~piso. None si no hay piso definido (sin corte)."""
         if self.config.target_pct_btc is None:
+            return None
+        piso = self.config.target_pct_btc
+        techo = self.config.techo_pct_btc
+        a, b = self.config.border_a, self.config.border_b
+        if b <= a:
+            return piso
+        step = self._steps[idx]
+        mid = (step["low"] + step["high"]) / Decimal("2")
+        frac = (mid - a) / (b - a)  # 0 en A, 1 en B
+        frac = max(Decimal("0"), min(Decimal("1"), frac))
+        return techo - (techo - piso) * frac
+
+    def _blocked_by_local_target(self, idx: int, side: TradeType) -> bool:
+        """True si la grilla (idx, side) NO debe crearse porque el %BTC firme ya
+        cruzó el target LOCAL de ese escalón. SHORT frena si %BTC <= target_local
+        (ya descargó lo que toca acá); LONG frena si %BTC >= target_local (ya cargó).
+        Esto distribuye la descarga por el rango y evita el churn de oscilación en
+        un borde: en un escalón de precio bajo (target alto) las SHORT no venden."""
+        tl = self._target_local(idx)
+        if tl is None:
             return False
         pct = self._current_pct_btc()
         if pct is None:
-            return False  # sin lectura confiable, no cortar
-        return pct <= self.config.target_pct_btc
+            return False  # sin lectura confiable, no bloquear
+        if side == TradeType.SELL:
+            return pct <= tl   # ya por debajo del target local -> no descargar más acá
+        return pct >= tl       # LONG: ya por encima -> no cargar más acá
+
+    def _in_hysteresis_band(self, step: dict, mid_price: Decimal) -> bool:
+        """True si el precio está dentro de la franja de histéresis pegada a los
+        bordes del escalón (no poblar ahí). Margen = hysteresis_pct del ancho del
+        escalón en cada borde. Evita el churn de relevo cuando el precio oscila
+        justo en un borde."""
+        h = self.config.hysteresis_pct
+        if h <= 0:
+            return False
+        ancho = step["high"] - step["low"]
+        margen = ancho * h
+        return (mid_price < step["low"] + margen) or (mid_price > step["high"] - margen)
 
     def _create_if_possible(self, idx: int, side: TradeType, active: set,
-                            actions: list, mid_price: Decimal):
+                            actions: list, mid_price: Decimal,
+                            apply_hysteresis: bool = False):
         """Crea la grilla del slot (idx, side) si el escalón existe, el precio está
         DENTRO de su banda, y no está ya activo."""
         if not (0 <= idx < self.config.n_grids):
@@ -433,9 +525,26 @@ class Chessboard(ControllerBase):
         # loop. Solo creamos grillas en el escalón que efectivamente contiene el precio.
         if not (step["low"] <= mid_price <= step["high"]):
             return
-        # CORTE EN TARGET: si la descarga ya alcanzó el target, no crear más SHORT.
-        # Las LONG siguen habilitadas (pueden recargar si el precio baja).
-        if side == TradeType.SELL and self._target_reached():
+        lid_log = self._level_id(idx, side)
+        # CORTE EN TARGET LOCAL: cada escalón tiene su %BTC objetivo (curva techo->piso).
+        # SHORT frena si ya descargó lo que toca acá; LONG si ya cargó. Evita liquidar
+        # todo en precios bajos y distribuye el rebalanceo por el rango.
+        if self._blocked_by_local_target(idx, side):
+            tl = self._target_local(idx)
+            pct = self._current_pct_btc()
+            self.logger().info(
+                f"[GRIGADO] BLOQUEO target-local {lid_log}: %BTC={pct} "
+                f"{'<=' if side == TradeType.SELL else '>='} target_local={tl} (no se crea)")
+            return
+        # HISTÉRESIS: SOLO cuando el relevo viene de un TAKE_PROFIT (apply_hysteresis).
+        # Esa es la consecutiva que vende/compra TODO su capital al nacer -> si el
+        # precio oscila en el borde, ese churn descarga/carga de más. En cambio el
+        # relevo por POSITION_HOLD arranca operando normal (no abre de golpe), y el
+        # despliegue inicial / asegurar-par tampoco necesitan histéresis.
+        if apply_hysteresis and self._in_hysteresis_band(step, mid_price):
+            self.logger().info(
+                f"[GRIGADO] BLOQUEO histéresis {lid_log}: mid={mid_price} pegado al borde "
+                f"[{step['low']}-{step['high']}] (relevo desde TP, no se crea)")
             return
         level_id = self._level_id(idx, side)
         # No recrear si ya hay un executor ACTIVO en ese slot (active), ni si ya
@@ -454,10 +563,16 @@ class Chessboard(ControllerBase):
         # campaña: un lado se agota (bajando se acaba el BRL, vendiendo el BTC).
         capital = self._capital_for(side)
         if capital < self.config.min_order_amount_quote:
+            self.logger().info(
+                f"[GRIGADO] SIN-MUNICIÓN {level_id}: capital libre={capital:.2f} < "
+                f"min={self.config.min_order_amount_quote} (⊘ zona sin munición)")
             self._open_no_capital(level_id, idx, step, side, capital)
             return
         # Hay munición: si este slot tenía un evento no_capital abierto, ciérralo.
         self._close_no_capital(level_id)
+        self.logger().info(
+            f"[GRIGADO] CREA {level_id} ({'LONG' if side == TradeType.BUY else 'SHORT'}): "
+            f"capital={capital:.2f} target_local={self._target_local(idx)} mid={mid_price}")
         actions.append(CreateExecutorAction(
             controller_id=self.config.id,
             executor_config=self._make_grid_config(step, side),
@@ -557,7 +672,16 @@ class Chessboard(ControllerBase):
             self._relayed_executor_ids.add(ex_id)
             self._closed_handled.add(level_id)  # solo para el display "·"
             direction = self._relay_direction(side, ex.close_type)
-            self._create_if_possible(idx + direction, side, active, actions, mid_price)
+            # Histéresis SOLO si el relevo viene de un TAKE_PROFIT: la consecutiva
+            # abre posición (vende/compra todo) al nacer -> hay que evitar el churn
+            # de borde. POSITION_HOLD releva una grilla que arranca operando normal.
+            from_tp = ex.close_type == CloseType.TAKE_PROFIT
+            self.logger().info(
+                f"[GRIGADO] RELEVO {level_id} cerró por {ex.close_type.name} -> "
+                f"intenta cb_{idx + direction}_{'L' if side == TradeType.BUY else 'S'} "
+                f"(dir {direction:+d}, histéresis={'sí' if from_tp else 'no'})")
+            self._create_if_possible(idx + direction, side, active, actions, mid_price,
+                                     apply_hysteresis=from_tp)
 
         # 3) Asegurar el PAR en el escalón del precio (invariante CB4: siempre un
         #    par LONG+SHORT rodeando el precio). El relevo propaga cada cadena por
@@ -653,6 +777,36 @@ class Chessboard(ControllerBase):
         lines.append(
             f"│ Rotación: volumen={volume:.2f} │ turnover={turnover:.2f}x "
             f"(volumen/total) │ tasa={turnover_h:.3f}x/h │ encendido={hours:.2f}h"
+        )
+
+        # ── Economía: capital, volumen proyectado y rebates estimados ────────
+        _, quote_asset = self._side_assets()
+        # conversión a USDT: si el quote ya es USDT, factor 1; si no, USDT-BRL.
+        if quote_asset.upper() == "USDT":
+            quote_to_usdt = Decimal("1")
+        else:
+            try:
+                rate = self.market_data_provider.get_rate(f"USDT-{quote_asset}")  # ej USDT-BRL
+                quote_to_usdt = (Decimal("1") / Decimal(str(rate))) if rate and Decimal(str(rate)) > 0 else None
+            except Exception:
+                quote_to_usdt = None
+        total_usdt = (total_quote * quote_to_usdt) if quote_to_usdt is not None else None
+        # volumen proyectado = capital × tasa de rotación (turnover observado).
+        vol_h = total_quote * turnover_h               # volumen/hora en quote
+        vol_d = vol_h * Decimal("24")
+        REBATE = Decimal("0.00015")                    # +0.015% maker
+        reb_h, reb_d, reb_m = vol_h * REBATE, vol_d * REBATE, vol_d * Decimal("30") * REBATE
+
+        def _u(v):  # quote -> USDT (o '?' si no hay rate)
+            return f"${v * quote_to_usdt:,.2f}" if (quote_to_usdt is not None and v is not None) else "n/a"
+
+        usdt_s = f"${total_usdt:,.0f}" if total_usdt is not None else "n/a"
+        lines.append(
+            f"│ Capital: {total_quote:,.0f} {quote_asset} ({usdt_s} USDT) │ "
+            f"Vol proyectado: {_u(vol_h)}/h · {_u(vol_d)}/d (USDT, según tasa actual)"
+        )
+        lines.append(
+            f"│ Rebate {REBATE:.3%} → estimado: {_u(reb_h)}/h · {_u(reb_d)}/d · {_u(reb_m)}/mes (USDT)"
         )
         # Contador de cuántas grillas CERRARON en cada escalón (rotación por banda).
         # Desde _rebalance_events: cada evento es un cierre con su level_id.
