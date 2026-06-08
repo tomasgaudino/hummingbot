@@ -5,11 +5,12 @@
 > una sesión nueva (ver comando `/grigado`) y para chequear que no hagamos
 > cosas contradictorias.
 >
-> **Última actualización:** 2026-06-02
-> **Estado:** controller corriendo en producción con capital real (primera campaña).
-> Fase 1 del hedge (inventario firme con signo + conciliación + KPI log) completada
-> en código y testeada; pendiente validación en datos reales (Fase 2) y hedge perp
-> (Fase 3). Ver §6 y §9.
+> **Última actualización:** 2026-06-04
+> **Estado:** trabajo intenso en la ROUTINE (laboratorio de diseño) — modelo de
+> dimensionamiento de grillas al recorrido de inventario (techo↔piso). El controller
+> tiene los fixes de cobertura/capital aplicados y testeado (37 tests). Branch
+> `grigado` pusheado al fork `drupman`. La sesión reciente NO tocó el controller:
+> todo el avance fue en `condor/.../chessboard_lab.py`. Ver §11 (lo más fresco).
 
 ---
 
@@ -251,6 +252,15 @@ conclusiones erradas:
   abiertas: ¿un controller con dos patas o dos coordinados? ¿ajuste por evento o
   por gap agregado con cooldown? Se resuelven con los datos de Fase 2.
 
+### Controller: capital por slot — ✅ HECHO (2026-06-04)
+
+- ~~Capital por grilla/lado~~ **RESUELTO.** El controller dimensiona al recorrido
+  techo↔piso en vivo (`_recorrido_quote` + `_capital_for(side, idx)`), coincide
+  exacto con la routine. Ver §11.5. Nuevo campo config `techo_pct_btc`.
+- **Pendiente de validar en datos reales:** que el dimensionamiento asimétrico
+  funcione con capital real (las LONG piden mucho más que las SHORT → el balance
+  libre puede capar; el ⊘ de zona sin munición cubre ese caso). Relanzar y mirar.
+
 ### Otros pendientes
 
 - **v2 del corte en target:** reconciliar exacto el %BTC con los fills reales.
@@ -259,8 +269,7 @@ conclusiones erradas:
 - **Benchmark formal:** correr el teórico vs el real y medir el drift de cada
   parámetro operativo, decidir cuáles usar/desestimar.
 - **inverse_siding:** evaluar si aporta (está como flag, sin usar).
-- **Columnas de la routine:** "%BTC rango" hardcodeada y "Break-even"
-  redundante (mismo valor toda fila) — pendientes de arreglo.
+- ~~Columnas de la routine "%BTC rango" / "Break-even"~~ — **RESUELTO** (§11.1.5).
 - **Re-planificación al cierre de campaña:** cuando se alcanza el target, qué
   hace el sistema (¿nueva campaña? ¿para?).
 
@@ -277,6 +286,137 @@ por redundante/histórico — recuperable en git history):
   (auditable): control loop, relevo asimétrico, inventario firme, corte en target.
 - `docs/ROUTINES.md` — manual consolidado de las routines de Condor (laboratorio).
 - `docs/GRIGADO_JOURNAL.md` — este archivo: bitácora de decisiones y estado.
+
+---
+
+## 11. Laboratorio (routine `chessboard_lab`) — TRABAJO RECIENTE (2026-06-04)
+
+> Toda esta sección es lo más fresco. La routine vive en
+> `/Users/tomasgaudino/PycharmProjects/condor/trading_agents/grigado/routines/chessboard_lab.py`.
+> Validar sintaxis: `condor/.venv/bin/python -c "import ast; ast.parse(open('trading_agents/grigado/routines/chessboard_lab.py').read())"`.
+> El controller NO se tocó en esta sesión; todo el avance fue en la routine.
+
+### 11.1 Fixes de la routine (cronológico)
+1. **`''` (UI) → None.** La UI de Condor manda los campos vacíos como string `''`,
+   no `None`; pydantic v2 con `Optional[float]` revienta al parsear `''`. Fix:
+   `field_validator(mode="before")` que mapea `''`→None en base_assigned,
+   quote_assigned, border_a, border_b, target_levels_per_grid.
+2. **Vacío = balance.** base_assigned/quote_assigned default `None`; vacío toma del
+   balance real (× portfolio_pct). Quita los balances reales hardcodeados.
+3. **YAML 1:1 con el controller.** La routine genera el YAML con nombres EXACTOS de
+   ChessboardConfig (spread_per_subrange→min_spread_between_orders, etc.), pegable
+   directo. Sin traducción manual.
+4. **Niveles objetivo → despeja spread.** Campo `target_levels_per_grid`: fijás N
+   niveles por grilla y la routine DESPEJA el spread (`spread = ancho/(m·precio)`),
+   verificado contra la fórmula real del executor. Resolvió el "1 nivel ridículo".
+   La tabla ahora capa niveles por capital (min(ancho/spread, capital/min_order)),
+   fiel al executor.
+5. **Pulido cosmético:** sacada la estrella ⭐ (el %BTC real va en la anotación HOY),
+   más altura a la curva, eliminada sección "Config resuelta — resumen", sacadas
+   columnas "%BTC rango"/"Break-even" de la tabla y KPIs BTC/BRL tablero/% portfolio/
+   Balance.
+
+### 11.2 Curva de inventario — BUG REAL arreglado
+El gráfico decía 100% donde el KPI decía 83% (divergencia >15pp). Causa: la curva
+asumía "tablero completamente ejecutado desde A" (contaba TODAS las LONG por debajo
+del precio), no tu inventario real. **Fix:** `_inventory_curve` ahora está ANCLADA
+en el inventario actual y proyecta desde el precio actual: cuenta solo las grillas
+que el precio cruzaría de current→P. En el precio actual da exactamente tu %BTC real
+(coincide con el KPI). Subiendo → SHORT descargan; bajando → LONG cargan.
+
+### 11.3 Dimensionamiento — el insight central de la sesión
+**`total/N/2` está atado al NAV, NO al target.** Por eso sobredimensiona (en la
+campaña real ~6×): una sola grilla ya cruza el target y el corte frena el resto →
+1-2 saltos en vez de N. NO es una fuga; es que el capital por grilla debe ser
+función del RECORRIDO de inventario deseado, no del NAV total.
+
+**Matemática validada (clave: el NAV es invariante a comprar/vender** — intercambiás
+BTC↔BRL al precio, así que `btc_para(%) = % · NAV / precio`, despeje cerrado, no
+iterativo):
+- Para descargar de %actual→piso: vender `x = (base·p − piso·NAV)/p`, repartido en N
+  → N saltos parejos en %BTC.
+- Recorrido entre DOS extremos (lo último que hicimos): `techo_pct_btc` (nuevo campo)
+  = %BTC máx en A (carga máx, LONG) y `target_pct_btc` = piso en B (descarga máx,
+  SHORT). La curva recorre techo→piso a lo largo de A→B.
+
+**Helpers nuevos en la routine:**
+- `_descarga_para_target(base, quote, price, target, n)` → descarga al piso.
+- `_recorrido_inventario(base, quote, price, piso, techo)` → carga + descarga (dos
+  extremos). Devuelve brl_descarga, brl_carga, btc_piso, btc_techo.
+- `_build_grids(..., recorrido=, current_price=)` → dimensiona ASIMÉTRICO: reparte
+  brl_descarga entre las SHORT arriba del precio y brl_carga entre las LONG abajo.
+
+**Estado de la routine HOY:** la curva recorre el target↔techo (validado: 100% en A,
+83.2% actual, 75.8% en B con techo=100%/piso=75%). La tabla muestra Cap. SHORT /
+Cap. LONG (asimétrico) y Total grillas. El `total/N/2` se sacó de circulación.
+
+### 11.4 Cómo se "juega" con la agresividad de la curva (para el usuario)
+- **techo_pct_btc / target_pct_btc** = los dos extremos → cuánto inventario recorrés
+  (más amplio = más agresivo en %BTC).
+- **Rango A-B** = la pendiente: más angosto = curva más empinada (mismo movimiento de
+  precio mueve más inventario) = más agresivo.
+- **N** = en cuántos saltos se reparte.
+- **El %BTC actual** parte la curva: define cuánto va a carga (abajo) vs descarga
+  (arriba). Asimetría real cuando el precio actual está cerca de un borde.
+
+### 11.5 CONTROLLER YA EJECUTA EL MODELO (2026-06-04, cierre de sesión)
+**La brecha routine↔controller está CERRADA.** El controller ahora dimensiona cada
+grilla al recorrido techo↔piso, igual que la routine:
+- Config nuevo: `techo_pct_btc` (default 1.0) = %BTC máx en border_a (carga, LONG).
+  `target_pct_btc` = piso en border_b (descarga, SHORT).
+- `_recorrido_quote()` (en `chessboard.py`) replica `_recorrido_inventario` de la
+  routine: NAV invariante, `btc_para(%) = %·NAV/precio`, devuelve (brl_descarga, brl_carga).
+- `_capital_for(side, idx)` reparte brl_descarga entre las SHORT por encima del precio
+  y brl_carga entre las LONG por debajo. Capado por balance libre (anti-INSUFFICIENT).
+  Fallback a total/N/2 si no hay datos de recorrido.
+- **Verificado: coincidencia EXACTA con la routine** (mismos números: descarga R$24.638
+  + carga R$50.700; cap SHORT R$8.213, cap LONG R$50.700). 38 tests verdes.
+
+El capital es asimétrico por slot (SHORT≠LONG, y por escalón vía centro de masa) — el
+controller lo calcula en vivo al crear cada grilla, no lo recibe slot-por-slot. El
+YAML de la routine sigue llevando `total_amount_quote` aprox (informativo); lo que
+manda ahora es el dimensionamiento interno del controller a partir de target_pct_btc +
+techo_pct_btc + base/quote_assigned.
+
+### 11.6 TARGET LOCAL POR ESCALÓN + histéresis (2026-06-05) — BUG de oscilación
+**Problema real observado en producción:** vendió MÁS BTC del previsto. Causa (hipótesis
+del usuario, confirmada con el JSONL): cuando el precio OSCILA en un borde de relevo,
+cada cruce dispara un ciclo completo — SHORT cierra por TP → releva SHORT abajo (vende
+todo su capital al nacer) → sube → cierra HOLD → baja → compra todo → ... El corte de
+target GLOBAL no protege porque el relevo recrea la grilla y ésta descarga al poblarse.
+Dato: `cb_0_S` relevado 63 veces, `cb_0_L` 61 veces (oscilación pura). 269 TAKE_PROFIT
+vs 20 POSITION_HOLD — el inventario se movía por ciclos de TP, no por rebalanceo firme.
+
+**Fix (decisión del usuario): target LOCAL por escalón, no global.** Cada escalón tiene
+su %BTC objetivo = la curva determinística en su precio medio (lineal techo en border_a
+→ piso en border_b). Una SHORT de cb_i frena si %BTC ≤ target_local(i); una LONG si
+%BTC ≥ target_local(i). Así en precios BAJOS (target local alto, ~98%) las SHORT NO
+venden → no se liquida todo en el fondo; en precios ALTOS (target ~75%) sí descargan.
+La descarga se distribuye por el rango. Helpers: `_target_local(idx)`,
+`_blocked_by_local_target(idx, side)` (reemplazan `_target_reached` global).
+
+**+ Histéresis** (`hysteresis_pct`, default 0.1 = 10% del ancho del ESCALÓN en cada
+borde; 0.5 = bloquea todo): no poblar la grilla si el precio está pegado a un borde →
+mata el churn de relevo. Helper `_in_hysteresis_band`. Solo frena CREACIÓN/relevo (no
+el ciclo intra-grilla del executor por ahora).
+
+**MATIZ CLAVE (2026-06-05): histéresis SOLO en relevo desde TAKE_PROFIT.** Observación
+del usuario: la histéresis solo importa para la consecutiva que ABRE posición (vende/
+compra TODO su capital al nacer), que es la que releva un cierre TAKE_PROFIT (SHORT TP
+abajo → SHORT nueva abajo vende todo; LONG TP arriba → LONG nueva compra todo). El
+relevo por POSITION_HOLD arranca operando normal (no abre de golpe) → NO necesita
+histéresis. Despliegue inicial y asegurar-par tampoco. Implementado con flag
+`apply_hysteresis` en `_create_if_possible`, =True solo en el relevo cuando
+`close_type == TAKE_PROFIT`.
+
+**Sin gap con la routine:** el valor `hysteresis_pct` viaja routine→YAML→controller
+idéntico. La routine NO modela la histéresis en la curva (correcto: la curva proyecta
+el recorrido determinístico IDEAL sin oscilación; la histéresis protege en producción
+contra el churn real, no cambia la trayectoria ideal).
+
+Verificado con la config real: targets locales cb_0=97.9% ... cb_5=77.1%; con %BTC 83%
+la SHORT de cb_0 queda bloqueada (no vende en precio bajo) y la de cb_5 descarga. 38
+tests verdes. PENDIENTE: validar en datos reales que la oscilación ya no fuga el target.
 
 ---
 
