@@ -418,6 +418,55 @@ Verificado con la config real: targets locales cb_0=97.9% ... cb_5=77.1%; con %B
 la SHORT de cb_0 queda bloqueada (no vende en precio bajo) y la de cb_5 descarga. 38
 tests verdes. PENDIENTE: validar en datos reales que la oscilación ya no fuga el target.
 
+### 11.7 COMPOSABILIDAD: NAV asignado + %BTC inicial + quote genérico (2026-06-05, ROUTINE)
+Objetivo del usuario: la estrategia debe ser COMPONIBLE — le asignás un NAV y opera SOLO
+sobre eso, sin "ver" el resto (conviven otras estrategias en la misma cuenta).
+
+**MODELO CORRECTO (NAV + %BTC inicial), no montos líquidos.** Insight del usuario: "50k
+BRL + portfolio 100%" NO es 50k líquidos — es un NAV total de 50k compuesto 100% en BTC.
+Campos nuevos en `chessboard_lab.py` (reemplazan base_assigned/quote_assigned como entrada):
+- `nav_assigned`: NAV total en quote del par (vacío = TODO el NAV global de la cuenta).
+- `pct_btc_inicial`: %BTC del NAV (1.0=todo BTC, 0=todo líquido; vacío = %BTC global cuenta).
+- `portfolio_pct` ELIMINADO (era redundante: el NAV ya define el capital directo).
+- FIX: `total_amount_quote` del YAML = NAV asignado (`nav_brl`), no el capital-en-grillas
+  (brl_descarga+carga). El controller no usa este campo para quoting (dimensiona por
+  recorrido), así que es seguro — es la cifra de referencia.
+- Métricas del reporte reacomodadas: 1) NAV asignado (quote + base + % del portfolio
+  global), 2) {base} Range (%BTC actual + techo→piso que se tradea), 3) Rango A-B +
+  amplitud %, 4) precio. Sacada "%BTC portfolio" (redundante con la #1).
+Derivación: `base = nav×pct_btc/precio`, `quote = nav×(1−pct_btc)`. Ej: 50k+100% → 0.156
+BTC, 0 líquido. Verificado: el %BTC del NAV resultante coincide exacto con el pedido.
+El YAML del controller sigue saliendo con base_assigned/quote_assigned (los DERIVADOS) —
+el controller no cambia, solo cambia cómo la routine los calcula.
+
+**Quote genérico (no más BRL hardcodeado):** `base_asset, quote_asset` salen del
+`trading_pair` (BTC-BRL→BRL, BTC-USDT→USDT, BTC-FDUSD→FDUSD). El balance lee
+`token_totals[quote_asset]`. El precio pedido es el del PAR real, no BTC-BRL fijo.
+
+**NAV multi-quote:** `btc_brl_price` ahora es conceptualmente "precio del par" (mantiene
+el nombre por compat). `usdt_brl` = unidades de quote por 1 USDT: =1 si quote es USDT,
+si no se deriva `precio_par/BTC-USDT`. Verificado: BTC-BRL sin cambio (usdt_brl=5.4),
+BTC-USDT→1.0. NOTA: quedan ~44 usos del nombre `btc_brl_price` y `_brl()` en display/
+gráficos — funcionan (el valor es correcto) pero el formato sigue mostrando "R$"; pulido
+cosmético del display multi-quote queda PENDIENTE.
+
+Controller: NO se tocó. Ya recibe base_assigned/quote_assigned explícitos del YAML →
+ya es aislado. El cambio fue solo cómo la routine los CALCULA. Sin gap.
+
+### 11.8 Snapshots periódicos teórico-vs-real (2026-06-09, CONTROLLER)
+Nuevo JSONL `data/chessboard_snapshots_<id>.jsonl`, uno cada ~60s (trigger en
+`update_processed_data`, `_maybe_snapshot`/`_build_snapshot`). Para graficar post-corrida
+cómo fluctúa el inventario REAL vs el TEÓRICO en el tiempo. Cada snapshot:
+- `mid_price`, `nav` (invariante).
+- `real`: base/quote/pct_btc del inventario FIRME del tablero (aislado, no el connector
+  global). base_real = base_assigned + net_btc_from_grids.
+- `teorico`: al precio actual (= target_local del escalón del precio → base/quote).
+- `drift`: real − teórico (lo que se grafica).
+- `escalones[]`: por cada cb_i, su target_local_pct + base/quote teórico SI el precio
+  estuviera en ese escalón (la curva determinística discretizada). NAV invariante:
+  base = %·nav/precio, quote = nav·(1−%).
+Robusto (try/except, no rompe el loop). 38 tests verdes.
+
 ---
 
 ## Apéndice — Cómo mirar el estado en producción

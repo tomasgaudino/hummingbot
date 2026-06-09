@@ -143,6 +143,12 @@ class Chessboard(ControllerBase):
         # KPI CSV. El hedge se ajusta por evento discreto, no por curva continua.
         self._events_path = os.path.join("data", f"chessboard_events_{self.config.id}.jsonl")
 
+        # Snapshots periódicos teórico-vs-real (JSONL) para graficar el drift en el
+        # tiempo. Uno cada ~60s. Ver _maybe_snapshot / _build_snapshot.
+        self._snapshots_path = os.path.join("data", f"chessboard_snapshots_{self.config.id}.jsonl")
+        self._last_snapshot_ts: Optional[float] = None
+        self._snapshot_interval_s = 60.0
+
         # Timestamp de arranque del controller (base de la tasa de rotación).
         self._start_timestamp: Optional[float] = None
 
@@ -632,6 +638,76 @@ class Chessboard(ControllerBase):
         except Exception:
             pass
 
+    # ── Snapshots periódicos teórico-vs-real ─────────────────────────────────
+    def _maybe_snapshot(self):
+        """Cada ~snapshot_interval_s graba un snapshot teórico-vs-real al JSONL.
+        Robusto: no rompe el control loop si falla."""
+        try:
+            now = self.market_data_provider.time()
+            if (self._last_snapshot_ts is not None and
+                    now - self._last_snapshot_ts < self._snapshot_interval_s):
+                return
+            snap = self._build_snapshot(now)
+            if snap is None:
+                return
+            self._last_snapshot_ts = now
+            os.makedirs(os.path.dirname(self._snapshots_path), exist_ok=True)
+            with open(self._snapshots_path, "a") as f:
+                f.write(json.dumps(snap) + "\n")
+        except Exception:
+            pass
+
+    def _build_snapshot(self, ts: float) -> Optional[dict]:
+        """Snapshot teórico-vs-real. NAV invariante a comprar/vender:
+        nav = base·precio + quote. Para un %BTC objetivo: base = %·nav/precio,
+        quote = nav·(1−%). El teórico por escalón usa target_local(idx) como %BTC.
+        El real usa el inventario FIRME del tablero (aislado)."""
+        price = self.market_data_provider.get_price_by_type(
+            self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
+        if not price or price <= 0:
+            return None
+        # REAL: inventario firme del tablero (base_assigned + net firme).
+        base_real = self.config.base_assigned + self._net_btc_from_grids
+        nav = base_real * price + self.config.quote_assigned  # NAV del tablero (invariante)
+        if nav <= 0:
+            return None
+        quote_real = self.config.quote_assigned  # quote firme (líquido + ventas, simplif. v1)
+        pct_real = (base_real * price) / nav
+
+        # TEÓRICO al precio actual = %BTC que la curva da en el escalón del precio.
+        step_here = self._step_containing(price)
+        tl_here = self._target_local(step_here["idx"]) if step_here else None
+        if tl_here is None:
+            tl_here = pct_real  # sin target -> teórico = real
+        base_teo = tl_here * nav / price
+        quote_teo = nav * (Decimal("1") - tl_here)
+
+        # TEÓRICO por escalón: si el precio estuviera en cb_i, %BTC = target_local(i).
+        escalones = []
+        for s in self._steps:
+            tl = self._target_local(s["idx"])
+            pct = tl if tl is not None else pct_real
+            escalones.append({
+                "idx": s["idx"],
+                "low": float(s["low"]), "high": float(s["high"]),
+                "target_local_pct": float(pct),
+                "base_teorico": float(pct * nav / price),
+                "quote_teorico": float(nav * (Decimal("1") - pct)),
+            })
+
+        return {
+            "ts": ts,
+            "mid_price": float(price),
+            "nav": float(nav),
+            "real": {"base": float(base_real), "quote": float(quote_real),
+                     "pct_btc": float(pct_real)},
+            "teorico": {"base": float(base_teo), "quote": float(quote_teo),
+                        "pct_btc": float(tl_here)},
+            "drift": {"base": float(base_real - base_teo),
+                      "pct_btc": float(pct_real - tl_here)},
+            "escalones": escalones,
+        }
+
     # ── Decisión principal ───────────────────────────────────────────────────
     def determine_executor_actions(self) -> List[ExecutorAction]:
         actions: List[ExecutorAction] = []
@@ -721,6 +797,9 @@ class Chessboard(ControllerBase):
             "rebalance_events": self._rebalance_events,
             **recon,
         })
+
+        # Snapshot periódico teórico-vs-real (cada ~60s) para graficar el drift.
+        self._maybe_snapshot()
 
     def to_format_status(self) -> List[str]:
         mid_price = self.market_data_provider.get_price_by_type(
