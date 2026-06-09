@@ -130,6 +130,9 @@ class Chessboard(ControllerBase):
         self._rebalance_events: List[dict] = []
         # BTC firme neto acumulado por las grillas (con signo: LONG hold +, SHORT hold -).
         self._net_btc_from_grids: Decimal = Decimal("0")
+        # Quote firme neto acumulado, espejo del BTC (SELL +quote, BUY -quote). Permite
+        # el %BTC con NAV invariante: al vender base, el quote sube (no se encoge el NAV).
+        self._net_quote_from_grids: Decimal = Decimal("0")
 
         # ── Zonas sin munición (capital insuficiente para abrir la grilla) ───
         # level_id -> evento no_capital ABIERTO (estadía vigente del precio en una
@@ -342,6 +345,29 @@ class Chessboard(ControllerBase):
                 total -= base
         return total
 
+    @staticmethod
+    def _held_quote_signed(custom_info: Optional[dict]) -> Decimal:
+        """ΔQuote firme que un cierre dejó, CON SIGNO, espejo de _held_btc_signed.
+        Cada fill mueve base y quote en sentidos opuestos:
+          - BUY (cargó base): gastó quote -> −executed_amount_quote
+          - SELL (descargó base): cobró quote -> +executed_amount_quote
+        Así, al vender BTC el quote SUBE (el NAV no se encoge: solo se intercambia
+        base<->quote al precio del fill)."""
+        ci = custom_info or {}
+        orders = ci.get("held_position_orders") or []
+        total = Decimal("0")
+        for o in orders:
+            try:
+                quote = Decimal(str(o.get("executed_amount_quote", 0) or 0))
+            except Exception:
+                continue
+            side = str(o.get("trade_type", "")).upper()
+            if side == "BUY":
+                total -= quote
+            elif side == "SELL":
+                total += quote
+        return total
+
     def _position_base_signed(self, ex) -> Decimal:
         """BTC abierto-en-vuelo (transitorio, NO firme) de un executor activo, con
         signo según su side. El hedge lo IGNORA; solo informa el delta transitorio."""
@@ -367,8 +393,10 @@ class Chessboard(ControllerBase):
                 continue
             self._inventory_handled.add(ex_id)
             delta_btc = self._held_btc_signed(ex.custom_info)
+            delta_quote = self._held_quote_signed(ex.custom_info)
             level_id = getattr(ex.config, "level_id", None)
             self._net_btc_from_grids += delta_btc
+            self._net_quote_from_grids += delta_quote
             # Evento en memoria (lo usan status y _reconcile).
             self._rebalance_events.append({
                 "executor_id": ex_id,
@@ -453,11 +481,51 @@ class Chessboard(ControllerBase):
             "in_flight_btc": in_flight,
         }
 
-    def _current_pct_btc(self) -> Optional[Decimal]:
-        """%BTC de la SUB-CUENTA del tablero, medido sobre el inventario FIRME con
-        signo (base_assigned + net_btc_from_grids). Aislado del portfolio global
-        que comparten otras estrategias. None si no se puede calcular.
+    def _real_inventory_from_fills(self, price: Optional[Decimal] = None) -> Optional[dict]:
+        """Inventario REAL del tablero reconstruido desde los FILLS de TODOS los
+        executors (activos + cerrados), no solo el held firme. Es lo más fidedigno:
+        responde a lo que el bot efectivamente compró/vendió.
+
+        Regla simple: el inventario parte de base_assigned/quote_assigned y CADA
+        FILL firme lo altera 1:1 (al precio del fill, no al actual):
+          - BUY  (cargó base): +base, −quote (gastó quote)
+          - SELL (descargó):   −base, +quote (cobró quote)
+        Los ΔBase/ΔQuote firmes de cada cierre se ACUMULAN por evento en
+        _net_btc_from_grids / _net_quote_from_grids (ver _register_rebalance_events),
+        robusto a que la lista de executors cambie entre ticks.
+          base_real  = base_assigned  + net_btc_from_grids
+          quote_real = quote_assigned + net_quote_from_grids
+          nav        = base_real·precio + quote_real   (invariante salvo PnL real)
+
+        Devuelve {base, quote, nav, pct} o None.
         """
+        try:
+            if price is None:
+                price = self.market_data_provider.get_price_by_type(
+                    self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
+            if not price or price <= 0:
+                return None
+            base_real = self.config.base_assigned + self._net_btc_from_grids
+            quote_real = self.config.quote_assigned + self._net_quote_from_grids
+            nav = base_real * price + quote_real
+            if nav <= 0:
+                return None
+            return {
+                "base": base_real, "quote": quote_real, "nav": nav,
+                "pct": (base_real * price) / nav,
+            }
+        except Exception:
+            return None
+
+    def _current_pct_btc(self) -> Optional[Decimal]:
+        """%BTC de la SUB-CUENTA del tablero. Medido desde los FILLS reales
+        (base/quote reconstruidos), que refleja exactamente lo que el bot operó y
+        corrige el NAV (al vender BTC sube el quote, no solo baja el base). Aislado
+        del portfolio global. Fallback al held firme si no hay fills. None si falla.
+        """
+        inv = self._real_inventory_from_fills()
+        if inv is not None:
+            return inv["pct"]
         try:
             price = self.market_data_provider.get_price_by_type(
                 self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
@@ -666,13 +734,12 @@ class Chessboard(ControllerBase):
             self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
         if not price or price <= 0:
             return None
-        # REAL: inventario firme del tablero (base_assigned + net firme).
-        base_real = self.config.base_assigned + self._net_btc_from_grids
-        nav = base_real * price + self.config.quote_assigned  # NAV del tablero (invariante)
-        if nav <= 0:
+        # REAL: inventario firme del tablero desde fills (base y quote acumulados con
+        # signo). NAV invariante: al vender base, el quote sube (no se encoge el NAV).
+        inv = self._real_inventory_from_fills(price)
+        if inv is None:
             return None
-        quote_real = self.config.quote_assigned  # quote firme (líquido + ventas, simplif. v1)
-        pct_real = (base_real * price) / nav
+        base_real, quote_real, nav, pct_real = inv["base"], inv["quote"], inv["nav"], inv["pct"]
 
         # TEÓRICO al precio actual = %BTC que la curva da en el escalón del precio.
         step_here = self._step_containing(price)
@@ -707,6 +774,98 @@ class Chessboard(ControllerBase):
                       "pct_btc": float(pct_real - tl_here)},
             "escalones": escalones,
         }
+
+    # ── Gráfico ASCII de inventario (curva objetivo + posición real) ─────────
+    def _target_local_at_price(self, price: Decimal) -> Optional[Decimal]:
+        """Versión continua de _target_local: %BTC objetivo en un precio arbitrario
+        (lineal techo en border_a -> piso en border_b). Para dibujar la curva."""
+        if self.config.target_pct_btc is None:
+            return None
+        a, b = self.config.border_a, self.config.border_b
+        piso, techo = self.config.target_pct_btc, self.config.techo_pct_btc
+        if b <= a:
+            return piso
+        frac = max(Decimal("0"), min(Decimal("1"), (price - a) / (b - a)))
+        return techo - (techo - piso) * frac
+
+    def _inventory_chart_lines(self, mid_price: Decimal) -> List[str]:
+        """Gráfico ASCII: curva de %BTC objetivo (techo->piso) a lo largo del rango,
+        con la posición REAL (●) según el inventario reconstruido desde fills.
+        Eje X = precio [border_a, border_b], eje Y = %BTC. De un vistazo: dónde
+        estás (●) vs dónde deberías estar (curva ·), y si toca cargar o descargar."""
+        a, b = self.config.border_a, self.config.border_b
+        piso = self.config.target_pct_btc
+        techo = self.config.techo_pct_btc
+        if piso is None or b <= a or not mid_price or mid_price <= 0:
+            return []  # sin target o geometría inválida -> no hay curva que dibujar
+
+        inv = self._real_inventory_from_fills(mid_price)
+        if inv is None:
+            return []
+        pct_real = inv["pct"]
+        obj = self._target_local_at_price(mid_price)
+
+        W, H = 48, 9
+        y_top = techo
+        y_bot = piso - (techo - piso) * Decimal("0.15")  # margen abajo del piso
+
+        def yrow(p: Decimal) -> int:
+            if y_top == y_bot:
+                return 0
+            f = float((y_top - p) / (y_top - y_bot))
+            return max(0, min(H - 1, int(round(f * (H - 1)))))
+
+        def xcol(p: Decimal) -> int:
+            f = float((p - a) / (b - a))
+            return max(0, min(W - 1, int(round(f * (W - 1)))))
+
+        grid = [[" "] * W for _ in range(H)]
+        # curva objetivo (· en cada columna según el target_local de ese precio)
+        for c in range(W):
+            price = a + (b - a) * Decimal(c) / Decimal(W - 1)
+            tl = self._target_local_at_price(price)
+            if tl is not None:
+                grid[yrow(tl)][c] = "·"
+        # línea vertical tenue en el precio actual (donde no pise la curva)
+        c_now = xcol(mid_price) if a <= mid_price <= b else None
+        if c_now is not None:
+            for r in range(H):
+                if grid[r][c_now] == " ":
+                    grid[r][c_now] = "┊"
+            # posición REAL (●): %BTC real en el precio actual. Prioridad sobre todo.
+            grid[yrow(pct_real)][c_now] = "●"
+
+        def fp(p: Decimal) -> str:
+            return f"{float(p) * 100:4.0f}%"
+
+        diff = pct_real - obj if obj is not None else Decimal("0")
+        if obj is None:
+            diag = "sin target (no corta)"
+        elif diff > Decimal("0.002"):
+            diag = f"DESCARGAR (real {diff:+.1%} sobre objetivo)"
+        elif diff < Decimal("-0.002"):
+            diag = f"CARGAR (real {diff:+.1%} bajo objetivo)"
+        else:
+            diag = "EN OBJETIVO"
+
+        lines = ["│ ┌ Inventario %BTC vs precio  (· objetivo · ● HOY real desde fills)"]
+        for r in range(H):
+            yp = y_top - (y_top - y_bot) * Decimal(r) / Decimal(H - 1)
+            tag = ""
+            if r == yrow(techo):
+                tag = " ← techo"
+            elif r == yrow(piso):
+                tag = " ← piso/target"
+            lines.append(f"│ │ {fp(yp)} │" + "".join(grid[r]) + f"│{tag}")
+        lines.append("│ │       └" + "─" * W + "┘")
+        lines.append(f"│ │        {float(a):<8.0f}" + " " * (W - 16) + f"{float(b):>8.0f}")
+        obj_s = f"{float(obj):.1%}" if obj is not None else "n/a"
+        lines.append(f"│ │ real {float(pct_real):.1%}  ·  objetivo@HOY {obj_s}  →  {diag}")
+        lines.append(
+            f"│ │ base {float(inv['base']):.5f} BTC ({float(inv['base'] * mid_price):,.0f}) · "
+            f"quote {float(inv['quote']):,.0f} · NAV {float(inv['nav']):,.0f}")
+        lines.append("│ └")
+        return lines
 
     # ── Decisión principal ───────────────────────────────────────────────────
     def determine_executor_actions(self) -> List[ExecutorAction]:
@@ -788,11 +947,14 @@ class Chessboard(ControllerBase):
         recon = self._reconcile()
 
         spot_btc_firme = self.config.base_assigned + self._net_btc_from_grids
+        quote_firme = self.config.quote_assigned + self._net_quote_from_grids
         pct = self._current_pct_btc()
         self.processed_data.update({
             "net_btc_from_grids": self._net_btc_from_grids,
+            "net_quote_from_grids": self._net_quote_from_grids,
             "spot_btc_firme": spot_btc_firme,
             "btc_subcuenta": spot_btc_firme,
+            "quote_subcuenta": quote_firme,
             "pct_btc": pct,
             "rebalance_events": self._rebalance_events,
             **recon,
@@ -887,6 +1049,11 @@ class Chessboard(ControllerBase):
         lines.append(
             f"│ Rebate {REBATE:.3%} → estimado: {_u(reb_h)}/h · {_u(reb_d)}/d · {_u(reb_m)}/mes (USDT)"
         )
+
+        # Gráfico de inventario: curva objetivo (techo->piso) + posición real (●)
+        # reconstruida desde fills. Muestra dónde estás vs dónde deberías estar.
+        lines.extend(self._inventory_chart_lines(mid_price))
+
         # Contador de cuántas grillas CERRARON en cada escalón (rotación por banda).
         # Desde _rebalance_events: cada evento es un cierre con su level_id.
         passes_l: Dict[int, int] = {}

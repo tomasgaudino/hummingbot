@@ -5,7 +5,7 @@
 > una sesión nueva (ver comando `/grigado`) y para chequear que no hagamos
 > cosas contradictorias.
 >
-> **Última actualización:** 2026-06-04
+> **Última actualización:** 2026-06-09
 > **Estado:** trabajo intenso en la ROUTINE (laboratorio de diseño) — modelo de
 > dimensionamiento de grillas al recorrido de inventario (techo↔piso). El controller
 > tiene los fixes de cobertura/capital aplicados y testeado (37 tests). Branch
@@ -171,14 +171,29 @@ de su sub-cuenta de forma aislada.
 
 ---
 
-## 6. Estado actual (2026-06-02)
+## 6. Estado actual (2026-06-09)
 
-**Corriendo en producción**, primera campaña con capital real:
-- Sub-cuenta: ~0.00668 BTC + R$ 550 = NAV ~R$ 2784.
-- %BTC inicial 80% → target 60%.
-- Rango: 300.732 → 359.151, n_grids=4. Precio al lanzar ~334.6k (cae en cb_2).
-- Confirmado en runtime: par LONG+SHORT desplegado en cb_2, todas Limit Maker,
-  primeros trades en positivo (+0.14%), relevo aún no disparado.
+**Campaña nueva lista para lanzar** (config `chessboard-btc-brl-1.yml`):
+- Sub-cuenta: 0.14539073 BTC + R$ 4020.03 = NAV ~R$ 50.000 (coherente con
+  total_amount_quote informativo). %BTC inicial ~92%.
+- Recorrido: techo 100% (border_a) → piso 75% (border_b). n_grids=3.
+- Rango: 312.139 → 320.356 (ancho de escalón 0.88%, ~120 niveles/grilla a
+  min_spread 0.000072). Targets locales: cb_0=95.8%, cb_1=87.5%, cb_2=79.2%.
+- Capital asimétrico dimensionado por recorrido: cap SHORT ~R$4.240/grilla
+  (n_short=2), cap LONG ~R$4.020/grilla (n_long=1). Ambos >> min R$20.
+- **`hysteresis_pct: 0.5` INTENCIONAL** (decisión del usuario 2026-06-09): apaga
+  por completo el relevo-desde-TAKE_PROFIT (margen 0.5 por borde = 100% del
+  escalón → ninguna consecutiva-de-TP se crea nunca). El tablero igual opera por
+  despliegue inicial, relevo desde POSITION_HOLD y asegurar-par. Objetivo: cero
+  churn de oscilación en bordes, sacrificando la cadena de relevo por TP.
+- TP 0.0004 (40 bps), limit_distance 0.5%, leverage 1, keep_position=true,
+  open/TP LIMIT_MAKER, sin stop_loss. 38 tests verdes.
+- PRE-LANZAMIENTO: confirmar precio vivo dentro de [312.139–320.356] antes de
+  `start` (guarda de banda: si el precio salió del rango, no despliega par).
+
+**Campaña anterior (2026-06-02, histórica):** ~0.00668 BTC + R$550 = NAV ~R$2784,
+%BTC 80%→60%, rango 300.732–359.151 n_grids=4. Par desplegado en cb_2, primeros
+trades +0.14%, relevo no disparado.
 
 **Fase 1 del hedge COMPLETADA en código** (2026-06-02): el controller ahora mide
 el inventario firme con signo, registra cada cierre como evento discreto
@@ -466,6 +481,37 @@ cómo fluctúa el inventario REAL vs el TEÓRICO en el tiempo. Cada snapshot:
   estuviera en ese escalón (la curva determinística discretizada). NAV invariante:
   base = %·nav/precio, quote = nav·(1−%).
 Robusto (try/except, no rompe el loop). 38 tests verdes.
+
+### 11.9 GRÁFICO DE INVENTARIO EN EL STATUS + FIX del %BTC desde fills (2026-06-09)
+**Pedido del usuario:** poder ver en el `status` (consola HB) dónde está parado el
+tablero, como el gráfico de portfolio de la routine. Implementado en
+`to_format_status` (`_inventory_chart_lines`): gráfico ASCII con eje X = precio
+[border_a, border_b], eje Y = %BTC, la curva objetivo determinística (`·`, techo→piso),
+la posición REAL (`●`) y una línea vertical `┊` en el precio actual. Dos líneas de
+diagnóstico: "real X% · objetivo@HOY Y% → CARGAR/DESCARGAR" y "base/quote/NAV".
+
+**FIX de fondo que el pedido destapó — el %BTC tenía un bug de NAV (cierra la brecha
+§7.4 del todo).** El `_current_pct_btc` viejo bajaba el `base` al vender pero dejaba el
+`quote` FIJO (`quote_assigned`) → el NAV se "encogía" (plata fantasma) → %BTC mal
+(daba 75% donde correspondía 60% sobre 80/20000). Regla correcta (la del usuario):
+el inventario parte de base/quote_assigned y **cada fill lo altera 1:1** (BUY: +base
+−quote; SELL: −base +quote), NAV invariante (solo intercambia base↔quote al precio
+del fill). Cambios:
+- `_held_quote_signed`: espejo de `_held_btc_signed` (SELL +quote, BUY −quote).
+- `_net_quote_from_grids`: acumulador de quote firme con signo, junto a
+  `_net_btc_from_grids`. Ambos se acumulan por evento de cierre en
+  `_register_rebalance_events` (robusto a que la lista de executors cambie por tick).
+- `_real_inventory_from_fills(price)`: base_real = base_assigned + net_btc;
+  quote_real = quote_assigned + net_quote; nav = base·precio + quote; pct = base·precio/nav.
+- `_current_pct_btc` y `_build_snapshot` ahora usan ese helper (antes el snapshot tenía
+  el MISMO bug del quote fijo).
+- `processed_data` expone `net_quote_from_grids` y `quote_subcuenta`.
+
+**Consecuencia operativa:** afecta el CORTE EN TARGET real, no solo el display. Con el
+%BTC correcto, baja al ritmo real al descargar → corta cuando toca. Es justo el
+síntoma del §11.6 ("vendió más BTC del previsto"): el corte se disparaba tarde porque
+el NAV encogido sobreestimaba el %BTC. Test del recorrido actualizado a los números
+correctos (80%→60%→40%→20%, NAV invariante en 100k). 38 tests verdes.
 
 ---
 

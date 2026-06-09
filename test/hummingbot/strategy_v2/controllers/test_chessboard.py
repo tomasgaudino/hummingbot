@@ -379,10 +379,12 @@ class TestChessboard(IsolatedAsyncioWrapperTestCase):
 
     # ── Inventario firme con signo ───────────────────────────────────────────
     @staticmethod
-    def _held_orders(*pairs):
-        """pairs = ("BUY", "0.01"), ("SELL", "0.003") -> custom_info held_position_orders."""
+    def _held_orders(*pairs, price="1000"):
+        """pairs = ("BUY", "0.01"), ("SELL", "0.003") -> custom_info held_position_orders.
+        El quote de cada fill = base * price (cada fill mueve base y quote 1:1)."""
+        p = Decimal(str(price))
         return [{"trade_type": side, "executed_amount_base": amt,
-                 "executed_amount_quote": "0"} for side, amt in pairs]
+                 "executed_amount_quote": str(Decimal(str(amt)) * p)} for side, amt in pairs]
 
     def test_held_btc_signed_long_positive(self):
         ctrl, _ = self._make_controller()
@@ -621,10 +623,11 @@ class TestChessboard(IsolatedAsyncioWrapperTestCase):
               sin frenar las LONG.
 
         Sub-cuenta DIDÁCTICA (no la real): base=80, quote=20000, precio=1000 ->
-        %BTC inicial 80%. Cada SHORT POSITION_HOLD vende 20 BTC.
-          paso 1: net=-20 -> 75%   (sigue descargando)
-          paso 2: net=-40 -> 66.7% (sigue)
-          paso 3: net=-60 -> 50%   (<=60% -> corte activo)
+        %BTC inicial 80%. Cada SHORT POSITION_HOLD vende 20 BTC y cobra 20000 quote
+        (NAV invariante en 100000: solo intercambia base<->quote al precio del fill).
+          paso 1: net=-20 -> base=60 quote=40000 -> 60%   (sigue descargando)
+          paso 2: net=-40 -> base=40 quote=60000 -> 40%   (<=60% -> corte activo)
+          paso 3: net=-60 -> base=20 quote=80000 -> 20%   (cortado)
         """
         ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
         ctrl.config.target_pct_btc = Decimal("0.60")   # piso
