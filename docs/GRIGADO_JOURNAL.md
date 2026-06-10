@@ -558,6 +558,17 @@ Deuda solo cosmética (R$ hardcodeado en display, ya anotada).
 `_maybe_snapshot`, fixture común para reducir setup duplicado en tests, validación
 round-trip YAML routine→ChessboardConfig.
 
+### 11.11 Reporte de la routine reordenado + extracto conceptual (2026-06-10)
+Pedido del usuario, en `chessboard_lab.py` (Condor): (1) el YAML "Config resuelta"
+va al FINAL del reporte (es el artefacto de salida, no la lectura); (2) sacado el
+título "## Candles + niveles"; (3) nueva sección "Cómo leer los gráficos (y su
+espejo en el controller)": por cada gráfico teórico (curva de inventario, NAV
+estrategia-vs-hold, volumen de rebates, candles) dice QUÉ dato real del controller
+lo espeja — snapshots JSONL (`real`/`teorico`/`drift`), eventos JSONL, línea
+Rotación y gráfico del status. Es el mapa para medir dónde está el experimento
+contra la proyección. Cambio solo en Condor (working tree, sin commitear — el repo
+tenía staged ajeno).
+
 ---
 
 ## Apéndice — Cómo mirar el estado en producción
