@@ -5,12 +5,11 @@
 > una sesión nueva (ver comando `/grigado`) y para chequear que no hagamos
 > cosas contradictorias.
 >
-> **Última actualización:** 2026-06-09
-> **Estado:** trabajo intenso en la ROUTINE (laboratorio de diseño) — modelo de
-> dimensionamiento de grillas al recorrido de inventario (techo↔piso). El controller
-> tiene los fixes de cobertura/capital aplicados y testeado (37 tests). Branch
-> `grigado` pusheado al fork `drupman`. La sesión reciente NO tocó el controller:
-> todo el avance fue en `condor/.../chessboard_lab.py`. Ver §11 (lo más fresco).
+> **Última actualización:** 2026-06-10
+> **Estado:** campaña BTC-BRL lista para lanzar (config validada, §6). Auditoría
+> general completada (§11.10): fix de histéresis bypasseada + %BTC desde fills con
+> NAV invariante (§11.9), gráfico de inventario en el status, docs realineados,
+> 46 tests verdes. Branch `grigado` (commits locales sin pushear).
 
 ---
 
@@ -75,8 +74,8 @@ pasar al controller.
 control loop de Hummingbot (sin agente externo, sin delay). Despliega el par
 del escalón actual, releva por close_type, corta en target midiendo el %BTC
 de su sub-cuenta de forma aislada.
-- Path: `hummingbot/controllers/generic/chessboard.py`
-- Tests: `hummingbot/test/hummingbot/strategy_v2/controllers/test_chessboard.py` (16 tests)
+- Path: `controllers/generic/chessboard.py`
+- Tests: `test/hummingbot/strategy_v2/controllers/test_chessboard.py` (46 tests)
 - Backtest: `hummingbot/scripts/backtest_chessboard.py`
 - Config YAML: `hummingbot/conf/controllers/chessboard-btc-brl-1.yml`
 - Wrapper: `hummingbot/conf/scripts/conf_v2_chessboard_btc_brl.yml`
@@ -512,6 +511,52 @@ del fill). Cambios:
 síntoma del §11.6 ("vendió más BTC del previsto"): el corte se disparaba tarde porque
 el NAV encogido sobreestimaba el %BTC. Test del recorrido actualizado a los números
 correctos (80%→60%→40%→20%, NAV invariante en 100k). 38 tests verdes.
+
+### 11.10 AUDITORÍA GENERAL + fix histéresis bypasseada (2026-06-10)
+Auditoría completa (controller, tests, routine, docs) previa al relanzamiento.
+
+**HALLAZGO CRÍTICO — la histéresis era INEFECTIVA (bypasseada por la Fase 3).**
+Un test nuevo (`test_tp_relay_blocked_at_band_edge`) lo destapó: el relevo-desde-TP
+se bloqueaba por histéresis en la Fase 2, pero la Fase 3 (asegurar-par) recreaba el
+mismo slot EN EL MISMO TICK sin histéresis. Como la guarda de banda ya restringe
+toda creación al escalón del precio, todo lo que el relevo crearía lo crea también
+la Fase 3 → el bloqueo no bloqueaba nada. El `hysteresis_pct: 0.5` de la campaña
+no estaba apagando el churn. **Fix: histéresis PEGAJOSA** (`_tp_hysteresis_pending`):
+cuando un relevo-desde-TP se bloquea, el slot queda marcado y NINGUNA vía lo crea
+(Fase 3 incluida) mientras el precio siga en la franja; se libera cuando el precio
+llega al interior del escalón. Con 0.5 la franja cubre todo el escalón → el
+relevo-desde-TP queda apagado de verdad.
+
+**Otros fixes del controller:**
+- `_recorrido_quote` usaba `quote_assigned` fijo para el NAV (el mismo bug de
+  §11.9 en otra rama): ahora usa `_real_inventory_from_fills` → el capital por
+  grilla se dimensiona con el NAV invariante real.
+- `_current_pct_btc` simplificado (el fallback duplicaba la lógica con el bug).
+- `_capital_for`: parámetro `idx` muerto eliminado.
+- `needed_quote` del evento `no_capital` ahora reporta `min_order_amount_quote`
+  (antes el nominal total/N/2, stale).
+- Docstring del módulo: referencia rota a `chessboard_strategy_v1.md` → docs vivos.
+
+**Tests: 38 → 46.** Nuevos: `_held_quote_signed`, NAV invariante desde fills,
+`_recorrido_quote` con quote real, `_in_hysteresis_band` unit, relevo-TP bloqueado
+en borde (TP sí / HOLD no), relevo fuera de rango por el borde inferior, contenido
+del snapshot, gráfico ASCII (●, curva, diagnóstico).
+
+**Docs reelaborados:** CONTROLLER.md (capital por recorrido, 6 guardas de creación,
+§6.3 inventario desde fills NAV-invariante, §8 reescrito con target local +
+histéresis pegajosa + mermaid nuevo, §9.1 snapshots, §9.2 gráfico, tabla de estado
+completa, 46 tests). MANIFIESTO.md (perillas actualizadas — recorrido en vez de
+total/N/2, target local + histéresis, inventario desde fills). ROUTINES.md §3
+(reescrito: NAV componible, recorrido asimétrico, target_levels, curva anclada,
+YAML 1:1; pendientes depurados). Journal §4 (46 tests, paths).
+
+**Auditoría de la routine:** coherencia matemática y YAML 1:1 con el controller
+CONFIRMADA (recorrido, capital asimétrico, target local, curva NAV-invariante).
+Deuda solo cosmética (R$ hardcodeado en display, ya anotada).
+
+**Quedan como mejora futura (no bloqueante):** test del trigger temporal de
+`_maybe_snapshot`, fixture común para reducir setup duplicado en tests, validación
+round-trip YAML routine→ChessboardConfig.
 
 ---
 

@@ -84,16 +84,39 @@ qué* cerró. Esta es la mecánica central; el detalle con diagramas está en
 | LONG   | releva LONG +1 (arriba) | releva LONG −1 (abajo) |
 | SHORT  | releva SHORT −1 (abajo)  | releva SHORT +1 (arriba) |
 
-### Las dos perillas de calibración
+### Las perillas de calibración
 
-1. **Ancho / N** → define el **capital por grilla** (`total/N/2`) y el ancho del
-   escalón. Más N = más granularidad, más relevos, movimientos chicos.
-2. **Distancia del limit_price** → define la zona muerta y el **centro de masa** del
+1. **El recorrido techo↔piso** (`techo_pct_btc` / `target_pct_btc`) → define
+   **cuánto inventario** se mueve en total. El capital por grilla NO es `total/N/2`
+   (eso dimensiona al NAV y sobredimensiona): es la porción del recorrido que le
+   toca a cada escalón — `brl_descarga` repartido entre las SHORT arriba del precio,
+   `brl_carga` entre las LONG abajo (capital **asimétrico**).
+2. **Ancho / N** → la pendiente y la granularidad: rango más angosto = mismo
+   movimiento de precio mueve más inventario (más agresivo); N = en cuántos saltos.
+3. **Distancia del limit_price** → define la zona muerta y el **centro de masa** del
    rebalanceo (a qué precio promedio queda el inventario movido).
 
-> La primera dice **cuánto** inventario mueve cada grilla; la segunda, **a qué
-> precio promedio** lo mueve. El break-even agregado del tablero es el promedio de
-> los centros de masa de las grillas que rebalancearon.
+> La primera dice **cuánto** inventario mueve la campaña; la segunda, **a qué
+> ritmo**; la tercera, **a qué precio promedio**. El break-even agregado del tablero
+> es el promedio de los centros de masa de las grillas que rebalancearon.
+
+### Target local por escalón + histéresis
+
+El corte en target es **local, no global**: cada escalón tiene su %BTC objetivo
+(curva lineal techo en A → piso en B). Una SHORT frena si el %BTC ya está en/bajo
+el target de SU escalón; una LONG si ya está en/sobre. Así la descarga se
+distribuye por el rango y la oscilación del precio en un borde no fuga inventario.
+Complemento: **histéresis pegajosa** en el relevo-desde-TAKE_PROFIT (la única
+consecutiva que abre posición de golpe al nacer) — no se puebla mientras el precio
+esté pegado al borde del escalón. Detalle: `docs/CONTROLLER.md §8`.
+
+### El inventario se mide desde fills (NAV invariante)
+
+El %BTC de la sub-cuenta sale de los fills reales: cada fill mueve base y quote
+**1:1 al precio del fill** (BUY +base −quote; SELL −base +quote). El NAV es
+invariante al rebalanceo — vender BTC no destruye valor, lo convierte en quote.
+Medir el %BTC con el quote fijo encoge el NAV y sobreestima el %BTC (el corte
+dispara tarde y el tablero sobre-vende). Detalle: `docs/CONTROLLER.md §6.3`.
 
 ### Determinismo del flujo de inventario
 

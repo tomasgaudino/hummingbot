@@ -1,7 +1,7 @@
 """
 Chessboard Controller — tablero de grillas con pares LONG+SHORT y relevo asimétrico.
 
-Modelo (docs/chessboard_strategy_v1.md):
+Modelo (docs/CONTROLLER.md; tesis en docs/MANIFIESTO.md; bitácora en docs/GRIGADO_JOURNAL.md):
   - El rango [A, B] se divide en N escalones contiguos.
   - Cada escalón tiene DOS slots: una grilla LONG y una grilla SHORT.
   - En todo momento opera UN solo par: el del escalón que CONTIENE el precio
@@ -118,6 +118,11 @@ class Chessboard(ControllerBase):
         # el precio vuelve, y debe poder recrearse. Indexar por level_id bloqueaba
         # el slot para siempre -> dejaba el escalón del precio sin grillas.
         self._relayed_executor_ids: set[str] = set()
+        # Slots cuyo relevo-desde-TP fue bloqueado por histéresis. Mientras el precio
+        # siga en la franja, NINGUNA vía los crea (la Fase 3 asegurar-par tampoco:
+        # sin esto la recreaba en el mismo tick y la histéresis era inefectiva).
+        # Se libera cuando el precio llega al interior del escalón (fuera de la franja).
+        self._tp_hysteresis_pending: set[str] = set()
         # level_ids que fueron relevados ALGUNA vez (solo para el display "·").
         self._closed_handled: set[str] = set()
 
@@ -227,16 +232,18 @@ class Chessboard(ControllerBase):
         """BRL a mover de cada lado para recorrer el inventario techo<->piso (igual
         que _recorrido_inventario de la routine). El NAV es invariante a comprar/
         vender (intercambiás BTC<->BRL al precio), así que btc_para(%) = %*NAV/precio.
+        Usa el inventario REAL desde fills (base Y quote acumulados — el quote fijo
+        encogía el NAV y sobredimensionaba la descarga restante).
         Devuelve (brl_descarga, brl_carga). None si no se puede calcular."""
         try:
             price = self.market_data_provider.get_price_by_type(
                 self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
             if not price or price <= 0:
                 return None
-            base = self.config.base_assigned + self._net_btc_from_grids  # BTC firme actual
-            nav = base * price + self.config.quote_assigned
-            if nav <= 0:
+            inv = self._real_inventory_from_fills(price)
+            if inv is None:
                 return None
+            base, nav = inv["base"], inv["nav"]
             piso = self.config.target_pct_btc if self.config.target_pct_btc is not None else Decimal("0")
             techo = self.config.techo_pct_btc
             btc_piso = piso * nav / price
@@ -247,8 +254,8 @@ class Chessboard(ControllerBase):
         except Exception:
             return None
 
-    def _capital_for(self, side: TradeType, idx: int = None) -> Decimal:
-        """Capital de UNA grilla (slot idx, side), DIMENSIONADO AL RECORRIDO
+    def _capital_for(self, side: TradeType) -> Decimal:
+        """Capital de UNA grilla del lado `side`, DIMENSIONADO AL RECORRIDO
         techo<->piso (igual que la routine), capado por balance LIBRE real del lado.
 
         - SHORT: reparte brl_descarga entre las SHORT por ENCIMA del precio actual.
@@ -283,7 +290,7 @@ class Chessboard(ControllerBase):
             limit_price=self._limit_for(step, side),
             side=side,
             leverage=self.config.leverage,
-            total_amount_quote=self._capital_for(side, step["idx"]),
+            total_amount_quote=self._capital_for(side),
             min_spread_between_orders=self.config.min_spread_between_orders,
             min_order_amount_quote=self.config.min_order_amount_quote,
             max_open_orders=self.config.max_open_orders,
@@ -519,25 +526,11 @@ class Chessboard(ControllerBase):
 
     def _current_pct_btc(self) -> Optional[Decimal]:
         """%BTC de la SUB-CUENTA del tablero. Medido desde los FILLS reales
-        (base/quote reconstruidos), que refleja exactamente lo que el bot operó y
-        corrige el NAV (al vender BTC sube el quote, no solo baja el base). Aislado
-        del portfolio global. Fallback al held firme si no hay fills. None si falla.
-        """
+        (base/quote reconstruidos): refleja exactamente lo que el bot operó, con
+        NAV invariante (al vender base sube el quote, no solo baja el base).
+        Aislado del portfolio global. None si falla (ante falla no bloqueamos)."""
         inv = self._real_inventory_from_fills()
-        if inv is not None:
-            return inv["pct"]
-        try:
-            price = self.market_data_provider.get_price_by_type(
-                self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
-            if not price or price <= 0:
-                return None
-            btc_subcuenta = self.config.base_assigned + self._net_btc_from_grids
-            nav = btc_subcuenta * price + self.config.quote_assigned
-            if nav <= 0:
-                return None
-            return (btc_subcuenta * price) / nav
-        except Exception:
-            return None  # ante falla, no bloqueamos (deja operar)
+        return inv["pct"] if inv is not None else None
 
     def _target_local(self, idx: int) -> Optional[Decimal]:
         """Target de %BTC LOCAL del escalón idx = la curva determinística en su precio
@@ -610,17 +603,23 @@ class Chessboard(ControllerBase):
                 f"[GRIGADO] BLOQUEO target-local {lid_log}: %BTC={pct} "
                 f"{'<=' if side == TradeType.SELL else '>='} target_local={tl} (no se crea)")
             return
-        # HISTÉRESIS: SOLO cuando el relevo viene de un TAKE_PROFIT (apply_hysteresis).
-        # Esa es la consecutiva que vende/compra TODO su capital al nacer -> si el
-        # precio oscila en el borde, ese churn descarga/carga de más. En cambio el
-        # relevo por POSITION_HOLD arranca operando normal (no abre de golpe), y el
-        # despliegue inicial / asegurar-par tampoco necesitan histéresis.
-        if apply_hysteresis and self._in_hysteresis_band(step, mid_price):
-            self.logger().info(
-                f"[GRIGADO] BLOQUEO histéresis {lid_log}: mid={mid_price} pegado al borde "
-                f"[{step['low']}-{step['high']}] (relevo desde TP, no se crea)")
-            return
         level_id = self._level_id(idx, side)
+        # HISTÉRESIS: aplica cuando el relevo viene de un TAKE_PROFIT (apply_hysteresis)
+        # — esa consecutiva vende/compra TODO su capital al nacer, y si el precio
+        # oscila en el borde ese churn descarga/carga de más. El bloqueo es PEGAJOSO
+        # (_tp_hysteresis_pending): mientras el precio siga en la franja, NINGUNA vía
+        # crea el slot (la Fase 3 asegurar-par tampoco — sin esto lo recreaba en el
+        # mismo tick y la histéresis era inefectiva). Se libera cuando el precio
+        # llega al interior del escalón. El relevo por POSITION_HOLD arranca operando
+        # normal (no abre de golpe) -> sin histéresis, igual que el despliegue inicial.
+        if apply_hysteresis or level_id in self._tp_hysteresis_pending:
+            if self._in_hysteresis_band(step, mid_price):
+                self._tp_hysteresis_pending.add(level_id)
+                self.logger().info(
+                    f"[GRIGADO] BLOQUEO histéresis {lid_log}: mid={mid_price} pegado al borde "
+                    f"[{step['low']}-{step['high']}] (relevo desde TP, no se crea)")
+                return
+            self._tp_hysteresis_pending.discard(level_id)  # precio en el interior: libera
         # No recrear si ya hay un executor ACTIVO en ese slot (active), ni si ya
         # encolamos su creación en este mismo tick (evita duplicados relevo+par).
         if level_id in active:
@@ -661,13 +660,15 @@ class Chessboard(ControllerBase):
             return  # ya abierto, no spamear
         base_asset, quote_asset = self._side_assets()
         asset_needed = quote_asset if side == TradeType.BUY else base_asset
+        # mínimo necesario para abrir = una orden mínima (la guarda de munición
+        # compara contra esto; el nominal por recorrido puede ser mucho mayor).
         self._no_capital_open[level_id] = {
             "type": "no_capital",
             "level_id": level_id,
             "step": {"idx": idx, "low": float(step["low"]), "high": float(step["high"])},
             "side": "LONG" if side == TradeType.BUY else "SHORT",
             "asset_needed": asset_needed,
-            "needed_quote": float(self._capital_per_grid()),
+            "needed_quote": float(self.config.min_order_amount_quote),
             "available_quote": float(available),
             "ts_open": self.market_data_provider.time(),
             "ts_close": None,

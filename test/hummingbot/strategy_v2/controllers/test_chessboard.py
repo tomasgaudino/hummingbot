@@ -692,3 +692,162 @@ class TestChessboard(IsolatedAsyncioWrapperTestCase):
         # carga: net positivo; LONG releva abajo (cb_4_L); las LONG no se cortan nunca
         self.assertEqual(net, Decimal("10"))
         self.assertIn("cb_4_L", created)
+
+    # ── Inventario real desde fills (NAV invariante) ─────────────────────────
+    def test_held_quote_signed(self):
+        """Espejo del BTC: BUY gastó quote (−), SELL cobró quote (+)."""
+        ctrl, _ = self._make_controller()
+        ci = {"held_position_orders": self._held_orders(("BUY", "0.01"), ("SELL", "0.004"))}
+        # BUY 0.01 -> −10 quote ; SELL 0.004 -> +4 quote (price=1000) => −6
+        self.assertEqual(ctrl._held_quote_signed(ci), Decimal("-6"))
+        self.assertEqual(ctrl._held_quote_signed({}), Decimal("0"))
+        self.assertEqual(ctrl._held_quote_signed(None), Decimal("0"))
+
+    async def test_real_inventory_nav_invariant(self):
+        """Cada fill mueve base y quote 1:1 -> el NAV NO se encoge al vender.
+        base=80, quote=20000, precio=1000 (NAV=100k). SELL de 20 BTC:
+        base 60, quote 40000, NAV sigue 100k, %BTC 80%->60%."""
+        ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
+        ctrl.config.base_assigned = Decimal("80")
+        ctrl.config.quote_assigned = Decimal("20000")
+        self._set_price(mdp, "1000")
+        ex = self._mock_executor("cb_5_S", is_active=False,
+                                 status=RunnableStatus.TERMINATED,
+                                 close_type=CloseType.POSITION_HOLD, executor_id="EX1")
+        ex.custom_info = {"held_position_orders": self._held_orders(("SELL", "20"))}
+        ctrl.executors_info = [ex]
+        await ctrl.update_processed_data()
+        inv = ctrl._real_inventory_from_fills()
+        print(f"\n=== NAV invariante: base={inv['base']} quote={inv['quote']} "
+              f"nav={inv['nav']} pct={inv['pct']:.1%} ===")
+        self.assertEqual(inv["base"], Decimal("60"))
+        self.assertEqual(inv["quote"], Decimal("40000"))
+        self.assertEqual(inv["nav"], Decimal("100000"))
+        self.assertEqual(inv["pct"], Decimal("0.6"))
+
+    async def test_recorrido_quote_uses_real_quote(self):
+        """_recorrido_quote dimensiona con el quote REAL acumulado (no el assigned
+        fijo). Tras vender, la descarga restante se calcula sobre el NAV invariante."""
+        ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
+        ctrl.config.target_pct_btc = Decimal("0.60")
+        ctrl.config.techo_pct_btc = Decimal("1.0")
+        ctrl.config.base_assigned = Decimal("80")
+        ctrl.config.quote_assigned = Decimal("20000")
+        self._set_price(mdp, "1000")
+        # Sin fills: NAV=100k, %BTC=80%. piso=60% -> btc_piso=60 -> descarga=(80-60)*1000=20000
+        d0, c0 = ctrl._recorrido_quote()
+        self.assertEqual(d0, Decimal("20000"))
+        # SELL de 10 BTC: base=70, quote=30000, NAV sigue 100k -> descarga=(70-60)*1000=10000
+        ex = self._mock_executor("cb_5_S", is_active=False,
+                                 status=RunnableStatus.TERMINATED,
+                                 close_type=CloseType.POSITION_HOLD, executor_id="EX1")
+        ex.custom_info = {"held_position_orders": self._held_orders(("SELL", "10"))}
+        ctrl.executors_info = [ex]
+        await ctrl.update_processed_data()
+        d1, c1 = ctrl._recorrido_quote()
+        print(f"\n=== recorrido con quote real: descarga {d0} -> {d1} ===")
+        self.assertEqual(d1, Decimal("10000"))
+
+    # ── Histéresis ───────────────────────────────────────────────────────────
+    def test_in_hysteresis_band(self):
+        """Franja = hysteresis_pct del ancho en CADA borde. 0 = nunca; 0.5 = todo."""
+        ctrl, _ = self._make_controller(n_grids=10, a="340000", b="400000")
+        step = ctrl._steps[0]  # [340000, 346000], ancho 6000
+        ctrl.config.hysteresis_pct = Decimal("0.1")  # margen 600 por borde
+        self.assertTrue(ctrl._in_hysteresis_band(step, Decimal("340300")))   # pegado abajo
+        self.assertTrue(ctrl._in_hysteresis_band(step, Decimal("345700")))   # pegado arriba
+        self.assertFalse(ctrl._in_hysteresis_band(step, Decimal("343000")))  # centro
+        ctrl.config.hysteresis_pct = Decimal("0")
+        self.assertFalse(ctrl._in_hysteresis_band(step, Decimal("340001")))  # sin histéresis
+        ctrl.config.hysteresis_pct = Decimal("0.5")
+        self.assertTrue(ctrl._in_hysteresis_band(step, Decimal("342999")))   # bloquea todo
+
+    async def test_tp_relay_blocked_at_band_edge(self):
+        """Relevo desde TP con el precio pegado al borde del escalón destino: la
+        histéresis lo bloquea (la consecutiva-de-TP abre posición al nacer).
+        El mismo relevo desde POSITION_HOLD NO se bloquea (no abre de golpe)."""
+        ctrl, mdp = self._make_controller(n_grids=10, a="340000", b="400000")
+        ctrl.config.hysteresis_pct = Decimal("0.1")
+        # cb_6 = [376000, 382000], margen 600. Precio pegado al borde bajo de cb_6.
+        self._set_price(mdp, "376300")
+        ex_tp = self._mock_executor("cb_5_L", is_active=False,
+                                    status=RunnableStatus.TERMINATED,
+                                    close_type=CloseType.TAKE_PROFIT, executor_id="EXTP")
+        ctrl.executors_info = [ex_tp]
+        actions = ctrl.determine_executor_actions()
+        created = self._created(actions)
+        print(f"\n=== TP-relay en borde: creado={created} (cb_6_L NO debe estar) ===")
+        self.assertNotIn("cb_6_L", created)
+        # Mismo escenario pero el cierre fue POSITION_HOLD -> sin histéresis, SÍ crea.
+        ctrl2, mdp2 = self._make_controller(n_grids=10, a="340000", b="400000")
+        ctrl2.config.hysteresis_pct = Decimal("0.1")
+        self._set_price(mdp2, "376300")
+        ex_hold = self._mock_executor("cb_7_L", is_active=False,
+                                      status=RunnableStatus.TERMINATED,
+                                      close_type=CloseType.POSITION_HOLD, executor_id="EXH")
+        ctrl2.executors_info = [ex_hold]
+        created2 = self._created(ctrl2.determine_executor_actions())
+        self.assertIn("cb_6_L", created2)
+
+    # ── Relevo en bordes del tablero ─────────────────────────────────────────
+    def test_relay_out_of_range_low_border(self):
+        """SHORT TP en cb_0 releva hacia abajo (cb_-1): fuera de rango, no crea."""
+        ctrl, mdp = self._make_controller(n_grids=10, a="340000", b="400000")
+        self._set_price(mdp, "343000")  # dentro de cb_0
+        ex = self._mock_executor("cb_0_S", is_active=False,
+                                 status=RunnableStatus.TERMINATED,
+                                 close_type=CloseType.TAKE_PROFIT, executor_id="EX0")
+        ctrl.executors_info = [ex]
+        actions = ctrl.determine_executor_actions()
+        created = self._created(actions)
+        # el relevo cb_-1_S no existe; la Fase 3 igual repuebla el par del escalón
+        self.assertNotIn("cb_-1_S", created)
+        for lid in created:
+            self.assertTrue(lid.startswith("cb_0"))
+
+    # ── Snapshot teórico-vs-real ─────────────────────────────────────────────
+    async def test_build_snapshot_content(self):
+        """El snapshot trae real (desde fills), teórico (target_local del escalón
+        del precio) y drift = real − teórico. NAV invariante."""
+        ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
+        ctrl.config.target_pct_btc = Decimal("0.60")
+        ctrl.config.techo_pct_btc = Decimal("1.0")
+        ctrl.config.base_assigned = Decimal("80")
+        ctrl.config.quote_assigned = Decimal("20000")
+        self._set_price(mdp, "1000")
+        ctrl.executors_info = []
+        snap = ctrl._build_snapshot(1640995200.0)
+        print(f"\n=== snapshot: real={snap['real']} teorico={snap['teorico']} "
+              f"drift={snap['drift']} ===")
+        self.assertEqual(snap["nav"], 100000.0)
+        self.assertEqual(snap["real"]["pct_btc"], 0.8)
+        # precio 1000 matchea cb_4=[960,1000] (borde inclusivo): mid=980,
+        # frac=(980-800)/400=0.45 -> tl = 1 - 0.4*0.45 = 0.82
+        self.assertAlmostEqual(snap["teorico"]["pct_btc"], 0.82, places=10)
+        self.assertAlmostEqual(snap["drift"]["pct_btc"], -0.02, places=10)
+        self.assertEqual(len(snap["escalones"]), 10)
+
+    # ── Gráfico ASCII de inventario ──────────────────────────────────────────
+    async def test_inventory_chart_lines(self):
+        """El gráfico trae la curva (·), la posición real (●) y el diagnóstico
+        correcto según real vs objetivo local."""
+        ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
+        ctrl.config.target_pct_btc = Decimal("0.60")
+        ctrl.config.techo_pct_btc = Decimal("1.0")
+        # %BTC = 80000/95000 = 84.2% > objetivo@1000 = 80% -> DESCARGAR
+        ctrl.config.base_assigned = Decimal("80")
+        ctrl.config.quote_assigned = Decimal("15000")
+        self._set_price(mdp, "1000")
+        ctrl.executors_info = []
+        lines = ctrl._inventory_chart_lines(Decimal("1000"))
+        chart = "\n".join(lines)
+        print(f"\n{chart}")
+        self.assertTrue(lines, "el gráfico no debe ser vacío con target definido")
+        self.assertIn("●", chart)
+        self.assertIn("·", chart)
+        self.assertIn("techo", chart)
+        self.assertIn("piso", chart)
+        self.assertIn("DESCARGAR", chart)
+        # sin target -> sin gráfico
+        ctrl.config.target_pct_btc = None
+        self.assertEqual(ctrl._inventory_chart_lines(Decimal("1000")), [])

@@ -6,7 +6,7 @@
 > diseño — el **laboratorio** de la estrategia. La **ejecución** real vive en el
 > controller de Hummingbot (`docs/CONTROLLER.md`), sin agente externo.
 >
-> **Última actualización:** 2026-06-02
+> **Última actualización:** 2026-06-10
 
 ---
 
@@ -64,24 +64,42 @@ herramientas de soporte de distintos grados de madurez.
 **La routine principal.** Simulador determinístico del tablero; **no lanza nada**.
 
 - **Path:** `condor/trading_agents/grigado/routines/chessboard_lab.py`
-- Lee el portfolio real e infiere el inventario de la sub-cuenta (`base_assigned`,
-  `quote_assigned`). Obtiene S/R y define el rango `[A, B]` por índices de S/R
-  (`border_a_sr_idx`, `border_b_sr_idx`) o valores fijos.
-- **Tabla comparativa (núcleo):** una fila por cantidad de grillas (`min`..`max`),
-  mostrando niveles, spread, capital por grilla, viabilidad de `min_notional`, %BTC
-  alcanzable, break-even. Marca la fila `selected_grid`.
-- **Análisis profundo del `selected_grid`:** candles con niveles punteados + S/R en
-  negrita, curva de inventario cortada en el target, doble NAV (BRL/USDT), volumen
-  de rebates.
-- **Salida:** genera un bloque copiable "Config resuelta" para pasar al controller.
+- **Entrada componible (NAV + %BTC inicial):** `nav_assigned` (NAV total asignado
+  en quote; vacío = NAV global de la cuenta) y `pct_btc_inicial` (composición;
+  vacío = %BTC global). De ahí deriva `base_assigned`/`quote_assigned` para el
+  YAML. La estrategia opera SOLO sobre ese NAV (conviven otras en la cuenta).
+  Quote genérico: `base/quote_asset` salen del `trading_pair` (BRL, USDT, FDUSD).
+- Obtiene S/R y define el rango `[A, B]` por índices de S/R (`border_a_sr_idx`,
+  `border_b_sr_idx`) o valores fijos.
+- **Dimensionamiento al recorrido techo↔piso** (`_recorrido_inventario`): el
+  capital por grilla NO es `total/N/2` — es la porción del recorrido de inventario
+  (`techo_pct_btc` en A → `target_pct_btc` en B) que toca a cada escalón,
+  **asimétrico**: `brl_descarga` repartido entre las SHORT arriba del precio,
+  `brl_carga` entre las LONG abajo. Matemática idéntica al controller
+  (`_recorrido_quote`), verificada con coincidencia exacta.
+- **Perfil por niveles objetivo:** `target_levels_per_grid` fija N niveles por
+  grilla y DESPEJA el spread (`spread = ancho/(m·precio)`), fiel a la fórmula del
+  executor. Alternativa: `spread_per_subrange` crudo.
+- **Tabla comparativa (núcleo):** una fila por cantidad de grillas (`min`..`max`):
+  niveles, spread efectivo, capital SHORT/LONG (asimétrico), viabilidad de
+  `min_notional`. Marca la fila `selected_grid`.
+- **Curva de inventario ANCLADA al inventario real:** proyecta desde el precio
+  actual (en el precio actual da exactamente tu %BTC real); subiendo descargan las
+  SHORT, bajando cargan las LONG, cada grilla cortada por su **target local** (la
+  misma curva techo→piso del controller). + candles con niveles, NAV
+  estrategia-vs-hold, volumen de rebates.
+- **Salida:** bloque copiable "Config resuelta" — YAML **1:1 con
+  `ChessboardConfig`** (incluye `techo_pct_btc` y `hysteresis_pct`), pegable
+  directo en `conf/controllers/<id>.yml`. `total_amount_quote` va informativo (el
+  controller dimensiona por recorrido).
 
 **Pendientes conocidos:**
-- Orden de S/R por proximidad al precio (hoy por score).
-- Columna "%BTC rango" hardcodeada (no discrimina por fila).
-- "Break-even" redundante (mismo valor toda la fila).
+- Display multi-quote cosmético: `_brl()`/"R$" hardcodeado en gráficos y reporte
+  (~44 usos) — los valores son correctos, el formato muestra R$ aunque el quote
+  sea USDT.
 - `inverse_siding` es un no-op (flag sin efecto).
-- Modela el rebalanceo al punto medio del escalón, no al limit_price / distribución
-  real de órdenes.
+- Modela el rebalanceo al punto medio del escalón, no al limit_price /
+  distribución real de órdenes (reprice maker sin modelar).
 
 ---
 

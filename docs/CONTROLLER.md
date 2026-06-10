@@ -6,8 +6,8 @@
 > este doc divergen, uno de los dos está mal — y hay que arreglarlo.
 >
 > **Archivo:** `controllers/generic/chessboard.py`
-> **Tests:** `test/hummingbot/strategy_v2/controllers/test_chessboard.py` (26)
-> **Última actualización:** 2026-06-02
+> **Tests:** `test/hummingbot/strategy_v2/controllers/test_chessboard.py` (46)
+> **Última actualización:** 2026-06-10
 
 ---
 
@@ -43,16 +43,23 @@ flowchart TB
     classDef sleep fill:#444,color:#aaa
 ```
 
-- **Escalón** (`_build_steps`, L131): sub-rango `[low, high]` de ancho `(B−A)/N`.
+- **Escalón** (`_build_steps`): sub-rango `[low, high]` de ancho `(B−A)/N`.
 - **Slot**: cada escalón tiene DOS, identificados por `level_id` `cb_{i}_L` (LONG) y
-  `cb_{i}_S` (SHORT) (`_level_id`, L141).
-- **Capital por grilla** = `min(total/N/2, balance LIBRE del lado)` — el nominal
-  capado al balance real disponible (`_capital_for`). LONG mira quote (BRL) libre,
-  SHORT mira base (BTC) libre. Si el libre < `min_order_amount_quote`, NO se crea la
-  grilla: se marca **zona sin munición** (`⊘`). Evita INSUFFICIENT_BALANCE y refleja
-  el límite natural de la campaña (un lado se agota).
+  `cb_{i}_S` (SHORT) (`_level_id`).
+- **Capital por grilla** — dimensionado al **recorrido de inventario techo↔piso**
+  (`_recorrido_quote` + `_capital_for`), igual que la routine. NO es `total/N/2`:
+  - `brl_descarga` = BRL a vender para ir del %BTC actual al **piso**
+    (`target_pct_btc`, en B) → repartido entre las SHORT por encima del precio.
+  - `brl_carga` = BRL a comprar para ir del actual al **techo** (`techo_pct_btc`,
+    en A) → repartido entre las LONG por debajo del precio.
+  - NAV invariante: `btc_para(%) = %·NAV/precio` (despeje cerrado). El NAV se toma
+    del **inventario real desde fills** (§6.3), no del assigned estático.
+  - Capado por balance LIBRE del lado (`_available_quote_for`): LONG mira quote
+    libre, SHORT mira base libre valuado. Si el libre < `min_order_amount_quote`,
+    NO se crea: **zona sin munición** (`⊘`) + evento `no_capital`. Fallback a
+    `total/N/2` solo si el recorrido no se puede calcular.
 - **limit_price** de cada slot = borde de su banda ± `limit_distance_pct` — la zona
-  muerta / centro de masa del rebalanceo (`_limit_for`, L153).
+  muerta / centro de masa del rebalanceo (`_limit_for`).
 
 ---
 
@@ -94,21 +101,33 @@ flowchart TD
     class deploy,relay,pair f
 ```
 
-- **Fase 1 — Despliegue inicial** (L359): solo si NO hay ningún executor ni cierre
+- **Fase 1 — Despliegue inicial**: solo si NO hay ningún executor ni cierre
   previo. Crea el par del escalón que contiene el precio. Ocurre una vez.
-- **Fase 2 — Relevo asimétrico** (L368): por cada grilla cerrada (no procesada,
-  marcada en `_closed_handled` por `level_id`), activa la consecutiva en la
-  dirección de `_relay_direction`.
-- **Fase 3 — Asegurar el par** (L383): tras el relevo, crea el lado faltante del
-  escalón que contiene el precio. El relevo propaga cada cadena por separado, así
-  que en un movimiento sostenido un escalón puede quedar con un solo lado (hueco de
+- **Fase 2 — Relevo asimétrico**: por cada grilla cerrada (cada cierre se releva
+  UNA vez, guardado por `executor.id` en `_relayed_executor_ids`), intenta crear la
+  consecutiva en la dirección de `_relay_direction`. Si el cierre fue TAKE_PROFIT,
+  la creación pasa por histéresis (§8.2).
+- **Fase 3 — Asegurar el par**: tras el relevo, crea el lado faltante del escalón
+  que contiene el precio. El relevo propaga cada cadena por separado, así que en
+  un movimiento sostenido un escalón puede quedar con un solo lado (hueco de
   cobertura). Esta fase mantiene la invariante CB4 ("siempre un par rodeando el
-  precio"). **No reabre grillas ya relevadas** — la guarda `_closed_handled` lo
-  impide, evitando loops de re-creación.
+  precio"). Un slot relevado SÍ se repuebla cuando el precio vuelve (la guarda de
+  no-doble-relevo es por `executor.id`, no por `level_id`).
 
-> **Guardas de creación** (`_create_if_possible`, L332): toda creación (Fase 1, 2 y
-> 3) pasa por acá. Crea solo si el índice es válido `[0, N)`, el slot no está ya
-> activo ni relevado, y —si es SHORT— el target no fue alcanzado (corte).
+> **Guardas de creación** (`_create_if_possible`) — toda creación (Fase 1, 2 y 3)
+> pasa por acá, en orden:
+> 1. **Índice válido** `[0, N)`.
+> 2. **Banda** (anti-loop): el precio debe estar DENTRO de `[low, high]` del
+>    escalón. Una grilla que nace con el precio fuera de su banda muere al
+>    instante por TP con fill 0 y entra en loop de recreación.
+> 3. **Target local** (§8.1): SHORT frena si `%BTC ≤ target_local(idx)`; LONG si
+>    `%BTC ≥ target_local(idx)`.
+> 4. **Histéresis pegajosa** (§8.2): si el slot viene de un relevo-desde-TP y el
+>    precio está en la franja del borde, NO se crea — por NINGUNA vía (la Fase 3
+>    tampoco), hasta que el precio llegue al interior del escalón.
+> 5. **No duplicar**: ni activo ni ya encolado en este tick.
+> 6. **Munición**: si el capital libre del lado < `min_order_amount_quote`, marca
+>    zona `⊘` + evento `no_capital` y no crea.
 
 ---
 
@@ -193,6 +212,31 @@ spot_btc_firme = base_assigned + net_btc_from_grids
 Es el BTC real de la sub-cuenta. **El short perpetual debe igualar este número**
 (fase del hedge, aún no implementada). LONG hold lo sube, SHORT hold lo baja.
 
+### 6.3 Inventario real desde fills — NAV invariante (regla 1:1)
+
+El inventario del tablero parte de `base_assigned`/`quote_assigned` y **cada fill
+firme lo altera 1:1, al precio del fill**:
+
+```
+BUY  (cargó base):  +executed_amount_base, −executed_amount_quote
+SELL (descargó):    −executed_amount_base, +executed_amount_quote
+```
+
+Junto a `_net_btc_from_grids` se acumula el espejo `_net_quote_from_grids`
+(`_held_quote_signed`): al vender base el quote SUBE. Sin esto el NAV "se
+encogía" (plata fantasma) y el %BTC salía inflado — el corte disparaba tarde y el
+tablero sobre-vendía (bug corregido 2026-06-09).
+
+```
+base_real  = base_assigned  + net_btc_from_grids
+quote_real = quote_assigned + net_quote_from_grids
+nav        = base_real·precio + quote_real        (invariante salvo PnL real)
+%BTC       = base_real·precio / nav
+```
+
+Implementado en `_real_inventory_from_fills`; lo consumen `_current_pct_btc`
+(corte), `_recorrido_quote` (capital), `_build_snapshot` y el gráfico del status.
+
 ---
 
 ## 7. Conciliación — la prueba de que es un reloj suizo
@@ -223,25 +267,57 @@ flowchart LR
 
 ---
 
-## 8. Corte en target
+## 8. Corte en target LOCAL + histéresis
+
+### 8.1 Target local por escalón
+
+El corte ya **no es global**: cada escalón tiene su %BTC objetivo = la curva
+determinística en su precio medio (lineal: **techo** en A → **piso** en B):
+
+```
+target_local(idx) = techo − (techo − piso) · frac(mid_escalón)
+frac = (mid − A) / (B − A)
+```
 
 ```mermaid
 flowchart TD
-    short(["¿crear una SHORT?"]) --> has{target_pct_btc<br/>definido?}
-    has -- no --> ok["crear (cubre todo el rango)"]:::ok
-    has -- sí --> pct["pct = _current_pct_btc()<br/>sobre inventario firme"]
-    pct --> cmp{pct ≤ target?}
-    cmp -- "sí (descarga lista)" --> block["NO crear SHORT"]:::block
-    cmp -- no --> ok
+    create(["¿crear grilla (idx, side)?"]) --> has{target_pct_btc<br/>definido?}
+    has -- no --> ok["crear (sin corte)"]:::ok
+    has -- sí --> tl["tl = target_local(idx)<br/>pct = %BTC real desde fills"]
+    tl --> side{side}
+    side -- SHORT --> s{pct ≤ tl?}
+    side -- LONG --> l{pct ≥ tl?}
+    s -- "sí (ya descargó lo que toca acá)" --> block["NO crear"]:::block
+    s -- no --> ok
+    l -- "sí (ya cargó lo que toca acá)" --> block
+    l -- no --> ok
     classDef ok fill:#2d6a4f,color:#fff
     classDef block fill:#9d0208,color:#fff
 ```
 
-- Solo afecta a **SHORT** (descarga). Las **LONG** (carga) siguen siempre
-  (`_create_if_possible`, L335; `_target_reached`, L320).
-- `_current_pct_btc` (L302) mide sobre el inventario firme con signo de la
-  **sub-cuenta** (`base_assigned + net_btc_from_grids`), aislado del balance global
-  que comparten otras estrategias. Nunca el balance del connector.
+Efecto: en precios BAJOS (target local alto, ~techo) las SHORT **no venden** — no
+se liquida todo en el fondo; en precios ALTOS (target ~piso) sí descargan. La
+descarga se **distribuye por el rango**. Reemplaza al corte global, que no
+protegía contra la oscilación en un borde (cada cruce disparaba un ciclo completo
+de venta/recompra).
+
+### 8.2 Histéresis pegajosa (solo relevo-desde-TP)
+
+`hysteresis_pct` define una franja (fracción del ancho del escalón) pegada a cada
+borde. **Solo aplica a la consecutiva de un cierre TAKE_PROFIT** — esa grilla
+vende/compra TODO su capital al nacer, así que el churn de borde descarga/carga de
+más. El relevo por POSITION_HOLD, el despliegue inicial y asegurar-par operan
+normal (no abren de golpe).
+
+El bloqueo es **pegajoso** (`_tp_hysteresis_pending`): cuando un relevo-desde-TP
+se bloquea, el slot queda marcado y **ninguna vía lo crea** (la Fase 3
+asegurar-par tampoco) mientras el precio siga en la franja. Se libera cuando el
+precio llega al interior del escalón. Sin esta persistencia, la Fase 3 recreaba el
+slot en el mismo tick y la histéresis era inefectiva (bug corregido 2026-06-10).
+
+- `hysteresis_pct: 0` = sin histéresis. `0.1` = franja del 10% en cada borde.
+  `0.5` = la franja cubre todo el escalón → el relevo-desde-TP queda apagado por
+  completo (el tablero opera por las otras vías).
 
 ---
 
@@ -275,6 +351,22 @@ flowchart LR
 La escritura va en `try/except` que nunca rompe el control loop: el KPI no es ruta
 crítica.
 
+### 9.1 Snapshots periódicos teórico-vs-real
+
+Cada ~60s, `_maybe_snapshot` graba en `data/chessboard_snapshots_<id>.jsonl` un
+snapshot para graficar el drift en el tiempo: `mid_price`, `nav`, `real`
+(base/quote/%BTC desde fills, §6.3), `teorico` (el target_local del escalón del
+precio), `drift` (real − teórico) y `escalones[]` (la curva discretizada por
+escalón). Robusto: nunca rompe el loop.
+
+### 9.2 Gráfico de inventario en el status
+
+`to_format_status` incluye un gráfico ASCII (`_inventory_chart_lines`): eje X =
+precio `[A, B]`, eje Y = %BTC; la curva objetivo (`·`, techo→piso), la posición
+REAL (`●`, desde fills) y una línea `┊` en el precio actual, con diagnóstico
+`CARGAR / DESCARGAR / EN OBJETIVO` y la línea `base · quote · NAV`. De un
+vistazo: dónde estás vs dónde deberías estar.
+
 ---
 
 ## 10. Estado entre ticks (memoria del controller)
@@ -288,7 +380,10 @@ crítica.
 | `_inventory_handled` | set[str] | executor.ids ya **contados** (no contar 2×) | solo crece |
 | `_rebalance_events` | List[dict] | historial de cierres firmes | solo crece |
 | `_net_btc_from_grids` | Decimal | BTC firme neto con signo | sube/baja |
-| `_last_logged_net_btc` | Decimal? | último net logueado (KPI en cambios) | actualiza |
+| `_net_quote_from_grids` | Decimal | quote firme neto con signo (espejo, §6.3) | sube/baja |
+| `_tp_hysteresis_pending` | set[str] | slots bloqueados por histéresis pegajosa (§8.2) | entra/sale |
+| `_no_capital_open` | Dict[str,dict] | zonas sin munición vigentes (⊘) | abre/cierra |
+| `_last_snapshot_ts` | float? | último snapshot teórico-vs-real (§9.1) | actualiza |
 
 > **Distinción clave — todo lo recurrente se indexa por `executor.id`, no por
 > `level_id`:** un slot del tablero se re-visita cuando el precio vuelve, así que
