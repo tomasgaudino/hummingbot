@@ -569,6 +569,43 @@ Rotación y gráfico del status. Es el mapa para medir dónde está el experimen
 contra la proyección. Cambio solo en Condor (working tree, sin commitear — el repo
 tenía staged ajeno).
 
+### 11.12 CAPITAL = NAV·Δtarget_local — un salto por grilla (2026-06-10)
+**Bug observado por el usuario en el gráfico de la routine:** con 3 grillas, la
+curva de inventario mostraba UN solo acantilado de 98.3%→75% en vez de un salto
+por grilla. Dos causas en el modelo de reparto (`descarga/n_short`):
+1. **Concentración:** n_short contaba solo las grillas con centro de masa POR
+   ENCIMA del precio. Con el precio al 78% del rango quedaba n_short=1 → toda la
+   descarga (23pp de NAV) en cb_2.
+2. **Overshoot:** cada grilla vendía TODO su capital de una (el target local solo
+   gateaba la creación, no capaba el monto) → atravesaba su target local (79.2%)
+   hasta el piso (75%).
+
+**Fix (controller + routine): capital = NAV·Δtarget_local.** Como Δ%BTC =
+BRL_movido/NAV (NAV invariante), el capital exacto para llevar el %BTC al target
+local del escalón es:
+- `cap SHORT(idx) = NAV·(pct_actual − target_local(idx))`
+- `cap LONG(idx)  = NAV·(target_local(idx) − pct_actual)`
+En régimen (tl lineal, escalones uniformes) los saltos son PAREJOS:
+`NAV·(techo−piso)/N` por grilla — exactamente los "N saltos parejos" de §11.3. La
+1ª grilla cruzada desde el ancla absorbe el gap |pct_actual − su tl|. Delta ≤ 0 →
+capital 0 (consistente con el bloqueo por target local). Autocorrectivo: el
+controller lo calcula EN VIVO al crear cada grilla con el %BTC desde fills — tras
+descargar, la siguiente solo mueve SU porción. `_recorrido_quote` eliminado
+(obsoleto); `_capital_for(side, idx)` recupera el idx.
+
+**Routine espejo:** `_build_grids` dimensiona con la misma fórmula (quantum +
+ancla); `_inventory_curve` vende/compra CLAMPEADO al tl de cada com cruzado (la
+curva queda como escalera exacta sobre la línea de target). Tabla comparativa:
+columnas "Cap./salto" (quantum) y "Cap. 1ª (ancla)" reemplazan Cap. SHORT/LONG.
+Anotación del YAML actualizada.
+
+**Matiz de lectura del gráfico:** el nº de saltos visibles depende del ancla. Con
+el precio al final del rango solo queda UN com por cruzar subiendo → un salto
+(pero ahora aterriza en SU target local, no en el piso). La escalera completa se
+ve con el precio cerca de A. Verificado con el escenario real del screenshot:
+98.3% → 79.2% en cb_2 (antes 98.3% → 75%). 46 tests verdes (nuevos:
+`test_capital_for_un_salto_por_grilla`, `test_capital_se_autocorrige_con_fills`).
+
 ---
 
 ## Apéndice — Cómo mirar el estado en producción

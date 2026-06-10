@@ -88,9 +88,10 @@ qué* cerró. Esta es la mecánica central; el detalle con diagramas está en
 
 1. **El recorrido techo↔piso** (`techo_pct_btc` / `target_pct_btc`) → define
    **cuánto inventario** se mueve en total. El capital por grilla NO es `total/N/2`
-   (eso dimensiona al NAV y sobredimensiona): es la porción del recorrido que le
-   toca a cada escalón — `brl_descarga` repartido entre las SHORT arriba del precio,
-   `brl_carga` entre las LONG abajo (capital **asimétrico**).
+   (eso dimensiona al NAV y sobredimensiona): es `NAV·Δtarget_local` — cada grilla
+   mueve el %BTC **exactamente hasta el target local de su escalón** (un salto por
+   grilla). En régimen, saltos parejos de `NAV·(techo−piso)/N`; la primera grilla
+   desde el ancla absorbe el gap con el %BTC actual.
 2. **Ancho / N** → la pendiente y la granularidad: rango más angosto = mismo
    movimiento de precio mueve más inventario (más agresivo); N = en cuántos saltos.
 3. **Distancia del limit_price** → define la zona muerta y el **centro de masa** del

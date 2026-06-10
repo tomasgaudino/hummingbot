@@ -228,56 +228,34 @@ class Chessboard(ControllerBase):
         except Exception:
             return Decimal("0")
 
-    def _recorrido_quote(self):
-        """BRL a mover de cada lado para recorrer el inventario techo<->piso (igual
-        que _recorrido_inventario de la routine). El NAV es invariante a comprar/
-        vender (intercambiás BTC<->BRL al precio), así que btc_para(%) = %*NAV/precio.
-        Usa el inventario REAL desde fills (base Y quote acumulados — el quote fijo
-        encogía el NAV y sobredimensionaba la descarga restante).
-        Devuelve (brl_descarga, brl_carga). None si no se puede calcular."""
-        try:
-            price = self.market_data_provider.get_price_by_type(
-                self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
-            if not price or price <= 0:
-                return None
-            inv = self._real_inventory_from_fills(price)
-            if inv is None:
-                return None
-            base, nav = inv["base"], inv["nav"]
-            piso = self.config.target_pct_btc if self.config.target_pct_btc is not None else Decimal("0")
-            techo = self.config.techo_pct_btc
-            btc_piso = piso * nav / price
-            btc_techo = techo * nav / price
-            brl_descarga = max(Decimal("0"), (base - btc_piso)) * price   # SHORT venden
-            brl_carga = max(Decimal("0"), (btc_techo - base)) * price     # LONG compran
-            return brl_descarga, brl_carga
-        except Exception:
-            return None
+    def _capital_for(self, side: TradeType, idx: int) -> Decimal:
+        """Capital de UNA grilla = lo EXACTO para llevar el %BTC de la sub-cuenta al
+        TARGET LOCAL de su escalón (un salto por grilla, aterrizando en la curva
+        determinística). Como el NAV es invariante (cada fill intercambia
+        base<->quote al precio), Δ%BTC = BRL_movido / NAV, entonces:
 
-    def _capital_for(self, side: TradeType) -> Decimal:
-        """Capital de UNA grilla del lado `side`, DIMENSIONADO AL RECORRIDO
-        techo<->piso (igual que la routine), capado por balance LIBRE real del lado.
+            cap SHORT(idx) = NAV · (pct_actual − target_local(idx))   [vende hasta SU target]
+            cap LONG(idx)  = NAV · (target_local(idx) − pct_actual)   [compra hasta SU target]
 
-        - SHORT: reparte brl_descarga entre las SHORT por ENCIMA del precio actual.
-        - LONG:  reparte brl_carga    entre las LONG  por DEBAJO del precio actual.
-        Fallback a total/N/2 si no hay datos de recorrido. El cap por balance libre
-        evita INSUFFICIENT_BALANCE.
+        Sin reparto por lado: el modelo viejo (descarga/n_short) concentraba TODO el
+        recorrido en las grillas por encima del precio (con el precio arriba del
+        rango, una sola grilla absorbía todo y atravesaba su target local hasta el
+        piso). Con esto cada grilla mueve su porción y la siguiente se dimensiona en
+        vivo con el %BTC ya actualizado (autocorrectivo). Capado por balance LIBRE
+        (anti-INSUFFICIENT). Fallback a total/N/2 si no hay target o inventario.
         """
-        rec = self._recorrido_quote()
         nominal = None
-        if rec is not None:
-            brl_descarga, brl_carga = rec
-            mid = self.market_data_provider.get_price_by_type(
-                self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
-            # contar grillas de cada lado según su centro de masa vs el precio actual
-            n_short = sum(1 for s in self._steps
-                          if (s["low"] + s["high"]) / 2 >= mid) or 1
-            n_long = sum(1 for s in self._steps
-                         if (s["low"] + s["high"]) / 2 < mid) or 1
-            nominal = (brl_descarga / Decimal(n_short)) if side == TradeType.SELL \
-                else (brl_carga / Decimal(n_long))
-        if nominal is None or nominal <= 0:
+        tl = self._target_local(idx) if 0 <= idx < len(self._steps) else None
+        if tl is not None:
+            inv = self._real_inventory_from_fills()
+            if inv is not None:
+                delta = (inv["pct"] - tl) if side == TradeType.SELL else (tl - inv["pct"])
+                # delta <= 0 -> el target-local ya bloquea esta creación; capital 0.
+                nominal = inv["nav"] * max(Decimal("0"), delta)
+        if nominal is None:
             nominal = self._capital_per_grid()  # fallback histórico
+        if nominal <= 0:
+            return Decimal("0")
         return min(nominal, self._available_quote_for(side))
 
     def _make_grid_config(self, step: dict, side: TradeType) -> GridExecutorConfig:
@@ -290,7 +268,7 @@ class Chessboard(ControllerBase):
             limit_price=self._limit_for(step, side),
             side=side,
             leverage=self.config.leverage,
-            total_amount_quote=self._capital_for(side),
+            total_amount_quote=self._capital_for(side, step["idx"]),
             min_spread_between_orders=self.config.min_spread_between_orders,
             min_order_amount_quote=self.config.min_order_amount_quote,
             max_open_orders=self.config.max_open_orders,
@@ -634,7 +612,7 @@ class Chessboard(ControllerBase):
         # orden mínima, NO crear (evita INSUFFICIENT_BALANCE). Marca la zona como
         # "sin munición" y abre un evento no_capital. Es el límite natural de la
         # campaña: un lado se agota (bajando se acaba el BRL, vendiendo el BTC).
-        capital = self._capital_for(side)
+        capital = self._capital_for(side, idx)
         if capital < self.config.min_order_amount_quote:
             self.logger().info(
                 f"[GRIGADO] SIN-MUNICIÓN {level_id}: capital libre={capital:.2f} < "

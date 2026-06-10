@@ -518,32 +518,57 @@ class TestChessboard(IsolatedAsyncioWrapperTestCase):
     def test_capital_for_caps_at_free_balance(self):
         """_capital_for capa al balance libre del lado (evita INSUFFICIENT_BALANCE)."""
         ctrl, mdp = self._make_controller(n_grids=10, a="340000", b="400000")
+        ctrl.config.target_pct_btc = Decimal("0.10")  # target lejano -> nominal grande
         self._set_price(mdp, "373000")
-        # LONG con BRL libre chico -> capa a ese libre (el nominal del recorrido es mayor)
+        # LONG con BRL libre chico -> capa a ese libre (el nominal es mayor)
         self._set_balance(mdp, quote="800")
-        self.assertEqual(ctrl._capital_for(TradeType.BUY), Decimal("800"))
+        self.assertEqual(ctrl._capital_for(TradeType.BUY, 0), Decimal("800"))
 
-    def test_capital_for_dimensiona_al_recorrido(self):
-        """El capital se dimensiona al recorrido techo<->piso, asimétrico LONG/SHORT
-        (no total/N/2). SHORT reparte la descarga; LONG reparte la carga."""
-        ctrl, mdp = self._make_controller(n_grids=10, a="340000", b="400000")
-        ctrl.config.target_pct_btc = Decimal("0.50")   # piso 50%
-        ctrl.config.techo_pct_btc = Decimal("1.0")     # techo 100%
-        self._set_price(mdp, "373000")
-        self._set_balance(mdp)  # balance amplio: no capa, vemos el nominal del recorrido
-        rec = ctrl._recorrido_quote()
-        self.assertIsNotNone(rec)
-        brl_descarga, brl_carga = rec
-        # base 0.5 BTC @ 373000 = 186500 ; quote 25000 ; nav 211500 ; %BTC ~88%
-        # piso 50% y techo 100% -> hay descarga Y carga, ambas > 0
-        self.assertGreater(brl_descarga, 0)
-        self.assertGreater(brl_carga, 0)
-        cap_short = ctrl._capital_for(TradeType.SELL)
-        cap_long = ctrl._capital_for(TradeType.BUY)
-        # asimétrico: SHORT y LONG difieren (distinto nº de grillas por lado y distinto BRL)
-        self.assertNotEqual(cap_short, cap_long)
-        self.assertGreater(cap_short, 0)
-        self.assertGreater(cap_long, 0)
+    def test_capital_for_un_salto_por_grilla(self):
+        """Capital de cada grilla = NAV·|pct − target_local(idx)|: cada grilla lleva
+        el %BTC EXACTAMENTE a su target local (un salto por grilla, sin concentrar
+        todo el recorrido en las grillas por encima del precio, sin overshoot)."""
+        ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
+        ctrl.config.target_pct_btc = Decimal("0.60")   # piso
+        ctrl.config.techo_pct_btc = Decimal("1.0")     # techo
+        ctrl.config.base_assigned = Decimal("80")
+        ctrl.config.quote_assigned = Decimal("20000")  # NAV=100k, %BTC=80% @1000
+        self._set_price(mdp, "1000")
+        self._set_balance(mdp)  # balance amplio: no capa, vemos el nominal
+        ctrl.executors_info = []
+        # targets locales: tl(idx) = 1 - 0.4*frac(mid). cb_9 mid=1180 -> tl=0.62;
+        # cb_5 mid=1020 -> tl=0.78 ; cb_0 mid=820 -> tl=0.98
+        # SHORT cb_9: NAV·(0.80-0.62) = 18000 ; SHORT cb_5: NAV·(0.80-0.78) = 2000
+        self.assertEqual(ctrl._capital_for(TradeType.SELL, 9), Decimal("18000"))
+        self.assertEqual(ctrl._capital_for(TradeType.SELL, 5), Decimal("2000"))
+        # LONG cb_0: NAV·(0.98-0.80) = 18000 ; LONG cb_5: tl 0.78 < pct -> 0 (bloqueada)
+        self.assertEqual(ctrl._capital_for(TradeType.BUY, 0), Decimal("18000"))
+        self.assertEqual(ctrl._capital_for(TradeType.BUY, 5), Decimal("0"))
+        # SHORT cb_0: tl 0.98 > pct 0.80 -> delta negativo -> 0 (no vende en el fondo)
+        self.assertEqual(ctrl._capital_for(TradeType.SELL, 0), Decimal("0"))
+
+    async def test_capital_se_autocorrige_con_fills(self):
+        """Tras descargar, el capital de la siguiente SHORT se reduce: se calcula
+        en vivo con el %BTC actualizado (la grilla siguiente solo mueve SU porción)."""
+        ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
+        ctrl.config.target_pct_btc = Decimal("0.60")
+        ctrl.config.techo_pct_btc = Decimal("1.0")
+        ctrl.config.base_assigned = Decimal("80")
+        ctrl.config.quote_assigned = Decimal("20000")
+        self._set_price(mdp, "1000")
+        self._set_balance(mdp)
+        cap_antes = ctrl._capital_for(TradeType.SELL, 9)   # NAV·(0.80-0.62)=18000
+        # una SHORT vendió 10 BTC -> pct 70%, NAV sigue 100k
+        ex = self._mock_executor("cb_5_S", is_active=False,
+                                 status=RunnableStatus.TERMINATED,
+                                 close_type=CloseType.POSITION_HOLD, executor_id="EX1")
+        ex.custom_info = {"held_position_orders": self._held_orders(("SELL", "10"))}
+        ctrl.executors_info = [ex]
+        await ctrl.update_processed_data()
+        cap_despues = ctrl._capital_for(TradeType.SELL, 9)  # NAV·(0.70-0.62)=8000
+        print(f"\n=== autocorrección: cap cb_9_S {cap_antes} -> {cap_despues} ===")
+        self.assertEqual(cap_antes, Decimal("18000"))
+        self.assertEqual(cap_despues, Decimal("8000"))
 
     def test_long_no_capital_marks_zone(self):
         """LONG con BRL libre < min_order_amount no se crea, marca zona y abre evento."""
@@ -724,29 +749,6 @@ class TestChessboard(IsolatedAsyncioWrapperTestCase):
         self.assertEqual(inv["quote"], Decimal("40000"))
         self.assertEqual(inv["nav"], Decimal("100000"))
         self.assertEqual(inv["pct"], Decimal("0.6"))
-
-    async def test_recorrido_quote_uses_real_quote(self):
-        """_recorrido_quote dimensiona con el quote REAL acumulado (no el assigned
-        fijo). Tras vender, la descarga restante se calcula sobre el NAV invariante."""
-        ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
-        ctrl.config.target_pct_btc = Decimal("0.60")
-        ctrl.config.techo_pct_btc = Decimal("1.0")
-        ctrl.config.base_assigned = Decimal("80")
-        ctrl.config.quote_assigned = Decimal("20000")
-        self._set_price(mdp, "1000")
-        # Sin fills: NAV=100k, %BTC=80%. piso=60% -> btc_piso=60 -> descarga=(80-60)*1000=20000
-        d0, c0 = ctrl._recorrido_quote()
-        self.assertEqual(d0, Decimal("20000"))
-        # SELL de 10 BTC: base=70, quote=30000, NAV sigue 100k -> descarga=(70-60)*1000=10000
-        ex = self._mock_executor("cb_5_S", is_active=False,
-                                 status=RunnableStatus.TERMINATED,
-                                 close_type=CloseType.POSITION_HOLD, executor_id="EX1")
-        ex.custom_info = {"held_position_orders": self._held_orders(("SELL", "10"))}
-        ctrl.executors_info = [ex]
-        await ctrl.update_processed_data()
-        d1, c1 = ctrl._recorrido_quote()
-        print(f"\n=== recorrido con quote real: descarga {d0} -> {d1} ===")
-        self.assertEqual(d1, Decimal("10000"))
 
     # ── Histéresis ───────────────────────────────────────────────────────────
     def test_in_hysteresis_band(self):

@@ -46,18 +46,22 @@ flowchart TB
 - **Escalón** (`_build_steps`): sub-rango `[low, high]` de ancho `(B−A)/N`.
 - **Slot**: cada escalón tiene DOS, identificados por `level_id` `cb_{i}_L` (LONG) y
   `cb_{i}_S` (SHORT) (`_level_id`).
-- **Capital por grilla** — dimensionado al **recorrido de inventario techo↔piso**
-  (`_recorrido_quote` + `_capital_for`), igual que la routine. NO es `total/N/2`:
-  - `brl_descarga` = BRL a vender para ir del %BTC actual al **piso**
-    (`target_pct_btc`, en B) → repartido entre las SHORT por encima del precio.
-  - `brl_carga` = BRL a comprar para ir del actual al **techo** (`techo_pct_btc`,
-    en A) → repartido entre las LONG por debajo del precio.
-  - NAV invariante: `btc_para(%) = %·NAV/precio` (despeje cerrado). El NAV se toma
-    del **inventario real desde fills** (§6.3), no del assigned estático.
-  - Capado por balance LIBRE del lado (`_available_quote_for`): LONG mira quote
-    libre, SHORT mira base libre valuado. Si el libre < `min_order_amount_quote`,
-    NO se crea: **zona sin munición** (`⊘`) + evento `no_capital`. Fallback a
-    `total/N/2` solo si el recorrido no se puede calcular.
+- **Capital por grilla = NAV·Δtarget_local** (`_capital_for`) — **un salto por
+  grilla, aterrizando en la curva determinística**. Como el NAV es invariante,
+  `Δ%BTC = BRL_movido/NAV`, entonces:
+  - `cap SHORT(idx) = NAV·(%BTC_actual − target_local(idx))` — vende JUSTO hasta
+    el target de su escalón (sin overshoot).
+  - `cap LONG(idx) = NAV·(target_local(idx) − %BTC_actual)` — compra justo hasta
+    el suyo. Delta ≤ 0 → capital 0 (la creación ya está bloqueada por target local).
+  - En régimen los saltos son PAREJOS: `NAV·(techo−piso)/N` por grilla; la primera
+    grilla cruzada desde el ancla absorbe el gap `|%BTC_actual − su target|`.
+  - Calculado EN VIVO al crear cada grilla con el inventario real desde fills
+    (§6.3) → autocorrectivo: tras descargar, la siguiente solo mueve SU porción.
+  - Reemplaza al reparto `descarga/n_short` (concentraba todo el recorrido en las
+    grillas por encima del precio y atravesaba el target local hasta el piso).
+  - Capado por balance LIBRE del lado (`_available_quote_for`). Si el libre <
+    `min_order_amount_quote`, NO se crea: **zona sin munición** (`⊘`) + evento
+    `no_capital`. Fallback a `total/N/2` si no hay target o inventario.
 - **limit_price** de cada slot = borde de su banda ± `limit_distance_pct` — la zona
   muerta / centro de masa del rebalanceo (`_limit_for`).
 
