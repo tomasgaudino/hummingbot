@@ -613,6 +613,24 @@ de velas diarias (cierre stale + lento). El ticker correcto es `USDT-{quote}`
 (USDT-BRL). Fix: se pide solo `USDT-{quote}` y únicamente si el quote no es USDT
 (evita también el degenerado USDT-USDT). Sin commitear en Condor (staged ajeno).
 
+### 11.14 La curva incluía solo coms por delante — faltaba el escalón ACTUAL (2026-06-10)
+Tras §11.12 el usuario re-corrió la routine y la curva seguía mostrando UN salto.
+Causa: la proyección disparaba cada SHORT en su centro de masa, y el com del
+escalón ACTUAL (cb_1) había quedado apenas DETRÁS del precio → la proyección lo
+trataba como "ya cruzado" y no lo ejecutaba nunca. Pero el controller en vivo SÍ
+despliega la SHORT del escalón del precio (Fase 1/3) con capital
+NAV·(pct−tl(idx)) y vende en lo que queda de su banda. Fix (routine):
+- Trigger de la SHORT del escalón actual = punto medio de su zona RESTANTE de
+  venta (`max(com, (current+high)/2)`); las demás siguen en su com. LONG espejo
+  (`min(com, (current+low)/2)`).
+- El target al que vende cada grilla cruzada = `tl(mid del escalón)` (idéntico a
+  `_target_local(idx)` del controller), no el tl del precio del trigger.
+- Ancla de `_build_grids` por BANDA (no por com): la 1ª SHORT que absorbe el gap
+  es la del escalón actual si su banda sigue activa.
+Verificado con el escenario real: 98.3% → 87.5% (cb_1, dispara ya) → 79.2% (cb_2)
+— escalera exacta sobre los targets locales del controller. Controller sin
+cambios (ya era consistente). Sin commitear en Condor (staged ajeno).
+
 ---
 
 ## Apéndice — Cómo mirar el estado en producción
