@@ -606,6 +606,13 @@ ve con el precio cerca de A. Verificado con el escenario real del screenshot:
 98.3% → 79.2% en cb_2 (antes 98.3% → 75%). 46 tests verdes (nuevos:
 `test_capital_for_un_salto_por_grilla`, `test_capital_se_autocorrige_con_fills`).
 
+### 11.13 FIX get_prices: par invertido tumbaba el batch (2026-06-10, ROUTINE)
+La routine pedía `{quote}-USDT` (ej `BRL-USDT`, no existe) entre los pares
+auxiliares; el server responde 500 al batch ENTERO → el precio caía al fallback
+de velas diarias (cierre stale + lento). El ticker correcto es `USDT-{quote}`
+(USDT-BRL). Fix: se pide solo `USDT-{quote}` y únicamente si el quote no es USDT
+(evita también el degenerado USDT-USDT). Sin commitear en Condor (staged ajeno).
+
 ---
 
 ## Apéndice — Cómo mirar el estado en producción
