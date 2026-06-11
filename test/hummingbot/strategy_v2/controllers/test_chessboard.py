@@ -531,6 +531,7 @@ class TestChessboard(IsolatedAsyncioWrapperTestCase):
         ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
         ctrl.config.target_pct_btc = Decimal("0.60")   # piso
         ctrl.config.techo_pct_btc = Decimal("1.0")     # techo
+        ctrl.config.target_tolerance_pct = Decimal("0")  # aislar el modelo puro
         ctrl.config.base_assigned = Decimal("80")
         ctrl.config.quote_assigned = Decimal("20000")  # NAV=100k, %BTC=80% @1000
         self._set_price(mdp, "1000")
@@ -553,6 +554,7 @@ class TestChessboard(IsolatedAsyncioWrapperTestCase):
         ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
         ctrl.config.target_pct_btc = Decimal("0.60")
         ctrl.config.techo_pct_btc = Decimal("1.0")
+        ctrl.config.target_tolerance_pct = Decimal("0")  # aislar el modelo puro
         ctrl.config.base_assigned = Decimal("80")
         ctrl.config.quote_assigned = Decimal("20000")
         self._set_price(mdp, "1000")
@@ -749,6 +751,31 @@ class TestChessboard(IsolatedAsyncioWrapperTestCase):
         self.assertEqual(inv["quote"], Decimal("40000"))
         self.assertEqual(inv["nav"], Decimal("100000"))
         self.assertEqual(inv["pct"], Decimal("0.6"))
+
+    async def test_tolerance_band_keeps_pair_alive(self):
+        """Con tolerancia, el par VIVE estando en la curva: ambos lados con NAV·tol.
+        El desvío queda acotado: SHORT bloqueada bajo tl−tol, LONG sobre tl+tol."""
+        ctrl, mdp = self._make_controller(n_grids=10, a="800", b="1200")
+        ctrl.config.target_pct_btc = Decimal("0.60")
+        ctrl.config.techo_pct_btc = Decimal("1.0")
+        ctrl.config.target_tolerance_pct = Decimal("0.01")  # 1pp
+        # %BTC EXACTO en el target local de cb_5 (tl=0.78): base=78, quote=22000 @1000
+        ctrl.config.base_assigned = Decimal("78")
+        ctrl.config.quote_assigned = Decimal("22000")
+        self._set_price(mdp, "1000")
+        self._set_balance(mdp)
+        ctrl.executors_info = []
+        # En la curva exacta: ambos lados abiertos con NAV·tol = 1000 cada uno
+        self.assertEqual(ctrl._capital_for(TradeType.SELL, 5), Decimal("1000"))
+        self.assertEqual(ctrl._capital_for(TradeType.BUY, 5), Decimal("1000"))
+        self.assertFalse(ctrl._blocked_by_local_target(5, TradeType.SELL))
+        self.assertFalse(ctrl._blocked_by_local_target(5, TradeType.BUY))
+        # Fuera de la banda: pct 76.9% < tl−tol=77% -> SHORT bloqueada, LONG no
+        ctrl.config.base_assigned = Decimal("76.9")
+        ctrl.config.quote_assigned = Decimal("23100")
+        self.assertTrue(ctrl._blocked_by_local_target(5, TradeType.SELL))
+        self.assertFalse(ctrl._blocked_by_local_target(5, TradeType.BUY))
+        self.assertEqual(ctrl._capital_for(TradeType.SELL, 5), Decimal("0"))
 
     # ── Histéresis ───────────────────────────────────────────────────────────
     def test_in_hysteresis_band(self):

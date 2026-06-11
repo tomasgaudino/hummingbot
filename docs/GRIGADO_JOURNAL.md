@@ -657,6 +657,32 @@ gitignoreado): regenera el gráfico plotly teórico-vs-real desde los JSONL
 `data/tvr_<id>_<ts>.html`) + resumen ejecutivo a stdout (drift, inventario
 firme, grillas muertas vs rebalanceos).
 
+### 11.16 BANDA DE TOLERANCIA del target local (2026-06-11) — el par revive
+**Diagnóstico (logs de la sesión §11.15):** ~13.900 bloqueos por target-local vs
+23 creaciones en 4h (cb_1_L 6.933, cb_0_S 4.108, cb_2_L 2.817). El bloqueo
+binario deja el par medio-muerto SIEMPRE (si pct>tl solo vive la SHORT; si pct<tl
+solo la LONG) y en target exacto mata AMBOS lados → cero volumen justo cuando el
+rebalanceo está "perfecto". Para una estrategia de rebates, estar en target era
+el reloj parado. (Nota: el cero-fill de cb_2_S de esa sesión pudo ser falta de
+internet — corrida local desconectada.)
+
+**Fix: `target_tolerance_pct`** (nuevo config, default 0.01 = 1pp). La banda
+[tl−tol, tl+tol] reemplaza el bloqueo binario:
+- `cap SHORT = NAV·(pct − tl + tol)` ; `cap LONG = NAV·(tl + tol − pct)` —
+  bloqueada solo si ≤ 0.
+- En la curva exacta ambos lados viven con NAV·tol cada uno → el par cicla
+  alrededor de la curva y genera volumen. Desvío máx vs teórico acotado a ±tol
+  (techo 97 puede tocar 98; piso 75 puede tocar 74). El sizing sigue aterrizando
+  en la curva; tol es solo el colchón operativo.
+- La guarda de munición capa: si NAV·tol < min_order no abre (con NAV 50k y 1pp
+  → R$500 por lado, holgado).
+Routine: perilla `target_tolerance_pct` + campo en el YAML + nota explicativa de
+la banda ANTES del gráfico de variación del portfolio (la curva sigue siendo el
+ideal determinístico; no modela la oscilación ±tol). Config activa actualizada
+(`target_tolerance_pct: '0.01'`). 47 tests verdes
+(`test_tolerance_band_keeps_pair_alive`). EXPERIMENTO: corrida de ~4h conectado
+para validar que el par cicla y hace volumen.
+
 ---
 
 ## Apéndice — Cómo mirar el estado en producción

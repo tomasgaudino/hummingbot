@@ -72,6 +72,15 @@ class ChessboardConfig(ControllerConfigBase):
     # 0 = sin histéresis. 0.1 = no crear si el precio está en el 10% más cercano a un borde.
     hysteresis_pct: Decimal = Field(default=Decimal("0.1"), json_schema_extra={"is_updatable": True})
 
+    # Tolerancia alrededor del target local (en puntos de %BTC, ej 0.01 = 1pp).
+    # Sin tolerancia el bloqueo es binario y el par nunca existe completo: con el
+    # %BTC clavado en la curva AMBOS lados quedan en capital 0 -> cero volumen justo
+    # cuando el rebalanceo está "perfecto" (mata el motor de rebates). La banda
+    # [tl-tol, tl+tol] deja vivir a los dos lados con NAV·tol cada uno: el par
+    # cicla alrededor de la curva y el desvío máximo vs el teórico queda acotado
+    # a ±tol (techo 97 puede tocar 98 con tol=1pp; piso 75 puede tocar 74).
+    target_tolerance_pct: Decimal = Field(default=Decimal("0.01"), json_schema_extra={"is_updatable": True})
+
     # Geometría
     n_grids: int = Field(default=10, json_schema_extra={"is_updatable": True})
     total_amount_quote: Decimal = Field(default=Decimal("1000"), json_schema_extra={"is_updatable": True})
@@ -249,8 +258,13 @@ class Chessboard(ControllerBase):
         if tl is not None:
             inv = self._real_inventory_from_fills()
             if inv is not None:
-                delta = (inv["pct"] - tl) if side == TradeType.SELL else (tl - inv["pct"])
-                # delta <= 0 -> el target-local ya bloquea esta creación; capital 0.
+                # Banda de tolerancia: el setpoint efectivo de la SHORT es tl-tol y el
+                # de la LONG tl+tol -> en la curva exacta ambos lados viven con NAV·tol
+                # (el par cicla y hace volumen; desvío acotado a ±tol del teórico).
+                tol = self.config.target_tolerance_pct
+                delta = (inv["pct"] - tl + tol) if side == TradeType.SELL \
+                    else (tl + tol - inv["pct"])
+                # delta <= 0 -> fuera de la banda; el target-local bloquea esta creación.
                 nominal = inv["nav"] * max(Decimal("0"), delta)
         if nominal is None:
             nominal = self._capital_per_grid()  # fallback histórico
@@ -528,20 +542,23 @@ class Chessboard(ControllerBase):
         return techo - (techo - piso) * frac
 
     def _blocked_by_local_target(self, idx: int, side: TradeType) -> bool:
-        """True si la grilla (idx, side) NO debe crearse porque el %BTC firme ya
-        cruzó el target LOCAL de ese escalón. SHORT frena si %BTC <= target_local
-        (ya descargó lo que toca acá); LONG frena si %BTC >= target_local (ya cargó).
-        Esto distribuye la descarga por el rango y evita el churn de oscilación en
-        un borde: en un escalón de precio bajo (target alto) las SHORT no venden."""
+        """True si la grilla (idx, side) NO debe crearse porque el %BTC firme está
+        FUERA de la banda de tolerancia del target local de ese escalón:
+        SHORT frena si %BTC <= tl - tol (ya descargó de más); LONG si %BTC >= tl + tol.
+        DENTRO de la banda ambos lados viven (con capital NAV·delta, ver _capital_for):
+        el par cicla alrededor de la curva y genera volumen, con desvío acotado a ±tol.
+        Sin la banda, el bloqueo binario dejaba el par medio-muerto siempre y en
+        target exacto mataba ambos lados (cero volumen = cero rebates)."""
         tl = self._target_local(idx)
         if tl is None:
             return False
         pct = self._current_pct_btc()
         if pct is None:
             return False  # sin lectura confiable, no bloquear
+        tol = self.config.target_tolerance_pct
         if side == TradeType.SELL:
-            return pct <= tl   # ya por debajo del target local -> no descargar más acá
-        return pct >= tl       # LONG: ya por encima -> no cargar más acá
+            return pct <= tl - tol   # bajo la banda -> no descargar más acá
+        return pct >= tl + tol       # LONG: sobre la banda -> no cargar más acá
 
     def _in_hysteresis_band(self, step: dict, mid_price: Decimal) -> bool:
         """True si el precio está dentro de la franja de histéresis pegada a los
