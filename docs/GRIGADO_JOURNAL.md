@@ -631,6 +631,28 @@ Verificado con el escenario real: 98.3% → 87.5% (cb_1, dispara ya) → 79.2% (
 — escalera exacta sobre los targets locales del controller. Controller sin
 cambios (ya era consistente). Sin commitear en Condor (staged ajeno).
 
+### 11.15 Primera sesión real analizada + skill /grigado-tvr (2026-06-10)
+**Sesión 19:07→23:09 (~4h), precio 317.6k→322.4k cruzando los 3 escalones.**
+Hallazgos del análisis de los JSONL:
+- **Inventario FIRME plano toda la sesión** (base/quote idénticos en 236
+  snapshots): 0 cierres con fills. Drift terminó en +14.1pp (teórico bajó
+  95.8→79.2%, real clavado en 93.2%).
+- **21 grillas muertas** (TAKE_PROFIT `filled=0`) en ráfagas sobre los bordes de
+  escalón: churn de ASEGURAR-PAR (no de relevo — la histéresis pegajosa no cubre
+  ese path). Capital asignado correcto (NAV·Δtl verificado contra los eventos).
+- **Punto ciego del snapshot:** `real.base/quote` solo acumula por evento de
+  cierre → fills EN VUELO y round-trips de grillas ACTIVAS no se ven. Un real
+  plano no distingue "0 fills" de "fills retenidos en posiciones abiertas".
+PENDIENTES que deja esta sesión: (a) enriquecer `_build_snapshot` con in_flight
++ realized de executors activos; (b) decidir si la histéresis debe cubrir
+también asegurar-par (matar el churn de borde); (c) verificar en el status/
+Binance si hubo volumen real.
+**Skill provisorio `/grigado-tvr`** (local, `.claude/skills/grigado-tvr/` —
+gitignoreado): regenera el gráfico plotly teórico-vs-real desde los JSONL
+(`scripts/plot_teorico_vs_real.py`, sin dependencias, HTML standalone en
+`data/tvr_<id>_<ts>.html`) + resumen ejecutivo a stdout (drift, inventario
+firme, grillas muertas vs rebalanceos).
+
 ---
 
 ## Apéndice — Cómo mirar el estado en producción
