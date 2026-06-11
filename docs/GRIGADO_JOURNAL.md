@@ -5,11 +5,15 @@
 > una sesión nueva (ver comando `/grigado`) y para chequear que no hagamos
 > cosas contradictorias.
 >
-> **Última actualización:** 2026-06-10
-> **Estado:** campaña BTC-BRL lista para lanzar (config validada, §6). Auditoría
-> general completada (§11.10): fix de histéresis bypasseada + %BTC desde fills con
-> NAV invariante (§11.9), gráfico de inventario en el status, docs realineados,
-> 46 tests verdes. Branch `grigado` (commits locales sin pushear).
+> **Última actualización:** 2026-06-10 (cierre de día)
+> **Estado:** PRIMERA SESIÓN REAL CORRIDA Y ANALIZADA (§11.15) — inventario firme
+> no se movió (0 cierres con fills), 21 grillas muertas por churn de borde de
+> asegurar-par, drift +14.1pp. Capital ahora = NAV·Δtarget_local (§11.12, un salto
+> por grilla). PRÓXIMOS PASOS: (a) snapshot con in_flight+realized de activos,
+> (b) ¿histéresis en asegurar-par?, (c) verificar volumen real en status/Binance.
+> Analizar corridas: skill local `/grigado-tvr`. 46 tests verdes. Branch `grigado`
+> pusheado a `drupman`. En Condor: chessboard_lab.py con cambios SIN commitear
+> (§11.12-11.14: curva clampeada + trigger del escalón actual + fix get_prices).
 
 ---
 
