@@ -156,6 +156,11 @@ class Chessboard(ControllerBase):
         # Contador de zonas sin munición ya cerradas (para el status).
         self._no_capital_closed_count: int = 0
 
+        # Anti-spam de logs de bloqueo: level_id -> motivo del último bloqueo
+        # logueado. Las guardas corren cada tick (~1/s) y el mismo estado repetido
+        # ahogaba la consola; se loguea solo el CAMBIO de estado (bloquea/libera).
+        self._block_logged: Dict[str, str] = {}
+
         # Registro único de eventos (JSONL): rebalance + no_capital. Reemplaza el
         # KPI CSV. El hedge se ajusta por evento discreto, no por curva continua.
         self._events_path = os.path.join("data", f"chessboard_events_{self.config.id}.jsonl")
@@ -592,11 +597,14 @@ class Chessboard(ControllerBase):
         # SHORT frena si ya descargó lo que toca acá; LONG si ya cargó. Evita liquidar
         # todo en precios bajos y distribuye el rebalanceo por el rango.
         if self._blocked_by_local_target(idx, side):
-            tl = self._target_local(idx)
-            pct = self._current_pct_btc()
-            self.logger().info(
-                f"[GRIGADO] BLOQUEO target-local {lid_log}: %BTC={pct} "
-                f"{'<=' if side == TradeType.SELL else '>='} target_local={tl} (no se crea)")
+            if self._block_logged.get(lid_log) != "target-local":
+                self._block_logged[lid_log] = "target-local"
+                tl = self._target_local(idx)
+                pct = self._current_pct_btc()
+                self.logger().info(
+                    f"[GRIGADO] BLOQUEO target-local {lid_log}: %BTC={pct:.4f} "
+                    f"{'<=' if side == TradeType.SELL else '>='} target_local={tl:.4f}±tol "
+                    f"(no se crea; se loguea solo el cambio de estado)")
             return
         level_id = self._level_id(idx, side)
         # HISTÉRESIS: aplica cuando el relevo viene de un TAKE_PROFIT (apply_hysteresis)
@@ -610,9 +618,11 @@ class Chessboard(ControllerBase):
         if apply_hysteresis or level_id in self._tp_hysteresis_pending:
             if self._in_hysteresis_band(step, mid_price):
                 self._tp_hysteresis_pending.add(level_id)
-                self.logger().info(
-                    f"[GRIGADO] BLOQUEO histéresis {lid_log}: mid={mid_price} pegado al borde "
-                    f"[{step['low']}-{step['high']}] (relevo desde TP, no se crea)")
+                if self._block_logged.get(lid_log) != "histeresis":
+                    self._block_logged[lid_log] = "histeresis"
+                    self.logger().info(
+                        f"[GRIGADO] BLOQUEO histéresis {lid_log}: mid={mid_price} pegado al borde "
+                        f"[{step['low']}-{step['high']}] (relevo desde TP, no se crea)")
                 return
             self._tp_hysteresis_pending.discard(level_id)  # precio en el interior: libera
         # No recrear si ya hay un executor ACTIVO en ese slot (active), ni si ya
@@ -631,13 +641,19 @@ class Chessboard(ControllerBase):
         # campaña: un lado se agota (bajando se acaba el BRL, vendiendo el BTC).
         capital = self._capital_for(side, idx)
         if capital < self.config.min_order_amount_quote:
-            self.logger().info(
-                f"[GRIGADO] SIN-MUNICIÓN {level_id}: capital libre={capital:.2f} < "
-                f"min={self.config.min_order_amount_quote} (⊘ zona sin munición)")
+            if self._block_logged.get(level_id) != "sin-municion":
+                self._block_logged[level_id] = "sin-municion"
+                self.logger().info(
+                    f"[GRIGADO] SIN-MUNICIÓN {level_id}: capital libre={capital:.2f} < "
+                    f"min={self.config.min_order_amount_quote} (⊘ zona sin munición)")
             self._open_no_capital(level_id, idx, step, side, capital)
             return
         # Hay munición: si este slot tenía un evento no_capital abierto, ciérralo.
         self._close_no_capital(level_id)
+        # Si estaba logueado como bloqueado, marcar la liberación (cambio de estado).
+        prev_block = self._block_logged.pop(level_id, None)
+        if prev_block:
+            self.logger().info(f"[GRIGADO] LIBERADO {level_id} (estaba bloqueado por {prev_block})")
         self.logger().info(
             f"[GRIGADO] CREA {level_id} ({'LONG' if side == TradeType.BUY else 'SHORT'}): "
             f"capital={capital:.2f} target_local={self._target_local(idx)} mid={mid_price}")
