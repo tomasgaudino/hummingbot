@@ -683,6 +683,13 @@ ideal determinístico; no modela la oscilación ±tol). Config activa actualizad
 (`test_tolerance_band_keeps_pair_alive`). EXPERIMENTO: corrida de ~4h conectado
 para validar que el par cicla y hace volumen.
 
+### 11.17 FIX inferencia %BTC global de la routine (2026-06-11)
+La routine inflaba el %BTC inferido del portfolio (98% vs 93% real): el NAV
+global sumaba solo BTC+USDT+quote y EXCLUÍA el resto de los tokens de la cuenta.
+Fix: NAV y %BTC globales salen de Σ `value` (USD) del endpoint de portfolio
+(cubre todos los tokens), × usdt_brl para denominar en quote; fallback al
+cálculo por unidades si no hay values. Solo routine (commit 3d8a1cb en Condor).
+
 ---
 
 ## Apéndice — Cómo mirar el estado en producción
